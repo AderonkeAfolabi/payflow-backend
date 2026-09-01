@@ -32,6 +32,7 @@ const subscribed = event("subscribed", [1n, SUBSCRIBER, MERCHANT], {
   amount: 10_000_000n,
   period: 2_592_000n,
   next_charge: 1_700_000_000n,
+  max_charges: 0,
 });
 
 function charged(chargesMade: number, nextCharge: number, txHash: string): DecodedEvent {
@@ -69,6 +70,26 @@ describe("indexer projections", () => {
     ix.apply(event("plan_status_changed", [MERCHANT, 1n], { active: false }));
     const row = d.prepare("SELECT active FROM plans WHERE id = 1").get() as { active: number };
     assert.equal(row.active, 0);
+  });
+
+  test("records the spend cap from the subscribe event", () => {
+    ix.apply(
+      event("subscribed", [2n, SUBSCRIBER, MERCHANT], {
+        plan_id: 1n,
+        amount: 10_000_000n,
+        period: 2_592_000n,
+        next_charge: 1_700_000_000n,
+        max_charges: 3,
+      }),
+    );
+    const row = d.prepare("SELECT max_charges FROM mandates WHERE id = 2").get() as {
+      max_charges: number;
+    };
+    assert.equal(
+      row.max_charges,
+      3,
+      "a capped mandate must not be projected as open-ended",
+    );
   });
 
   test("projects a mandate on subscribe", () => {
