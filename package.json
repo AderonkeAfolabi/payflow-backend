@@ -1,0 +1,33 @@
+{
+  "name": "payflow-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Event indexer, settlement keeper, and REST API for the Payflow protocol on Stellar.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "node --watch --experimental-strip-types src/index.ts",
+    "indexer": "node --experimental-strip-types src/cmd/indexer.ts",
+    "keeper": "node --experimental-strip-types src/cmd/keeper.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src test --ext .ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^13.1.0",
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}
