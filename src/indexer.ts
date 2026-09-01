@@ -137,9 +137,11 @@ export class Indexer {
         `INSERT INTO mandates
            (id, subscriber, merchant, plan_id, amount, period, next_charge,
             last_charge, charges_made, max_charges, status, ledger)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'Active', ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 'Active', ?)
          ON CONFLICT(id) DO UPDATE SET
-           subscriber = excluded.subscriber, merchant = excluded.merchant`,
+           subscriber  = excluded.subscriber,
+           merchant    = excluded.merchant,
+           max_charges = excluded.max_charges`,
       )
       .run(
         num(mandateId),
@@ -149,6 +151,7 @@ export class Indexer {
         big(e.data.amount),
         num(e.data.period),
         num(e.data.next_charge),
+        num(e.data.max_charges),
         e.ledger,
       );
   }
