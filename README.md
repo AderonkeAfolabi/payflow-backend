@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/payflow-protocol/payflow-backend/actions/workflows/ci.yml">
-    <img alt="CI" src="https://github.com/payflow-protocol/payflow-backend/actions/workflows/ci.yml/badge.svg"/>
+  <a href="https://github.com/titilope12/payflow-backend/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/titilope12/payflow-backend/actions/workflows/ci.yml/badge.svg"/>
   </a>
   <img alt="Node" src="https://img.shields.io/badge/node-22-green"/>
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.9-blue"/>
@@ -126,9 +126,9 @@ dashboard rather than in the blueprint.
 
 | Repo | Role |
 |---|---|
-| [payflow-contract](https://github.com/payflow-protocol/payflow-contract) | Soroban contracts this service indexes |
-| [payflow-backend](https://github.com/payflow-protocol/payflow-backend) | This repo |
-| [payflow-frontend](https://github.com/payflow-protocol/payflow-frontend) | Consumes this API |
+| [payflow-contract](https://github.com/titilope12/payflow-contract) | Soroban contracts this service indexes |
+| [payflow-backend](https://github.com/titilope12/payflow-backend) | This repo |
+| [payflow-frontend](https://github.com/titilope12/payflow-frontend) | Consumes this API |
 
 ## Contributing
 
@@ -143,12 +143,12 @@ See [SECURITY.md](SECURITY.md). Unaudited, testnet only.
 
 | Name | Role | Contact |
 |---|---|---|
-| _add your name_ | Lead maintainer | _add your Telegram_ |
+| Victor Adeleke | Lead maintainer | [@titilope12](https://github.com/titilope12) |
 
 ## Contributors
 
-<a href="https://github.com/payflow-protocol/payflow-backend/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=payflow-protocol/payflow-backend"/>
+<a href="https://github.com/titilope12/payflow-backend/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=titilope12/payflow-backend"/>
 </a>
 
 ## License
