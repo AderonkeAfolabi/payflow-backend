@@ -5,16 +5,16 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/titilope12/payflow-backend/actions/workflows/ci.yml">
-    <img alt="CI" src="https://github.com/titilope12/payflow-backend/actions/workflows/ci.yml/badge.svg"/>
+  <a href="https://github.com/MMM-pay/payflow-backend/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/MMM-pay/payflow-backend/actions/workflows/ci.yml/badge.svg"/>
   </a>
   <img alt="Node" src="https://img.shields.io/badge/node-22-green"/>
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.9-blue"/>
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-green"/>
 </p>
 
-> **Live demo:** https://titilope12.github.io/payflow-frontend/ ·
-> **Docs:** https://titilope12.github.io/payflow-docs/
+> **Live demo:** https://mmm-pay.github.io/payflow-frontend/ ·
+> **Docs:** https://mmm-pay.github.io/payflow-docs/
 
 ---
 
@@ -129,9 +129,9 @@ dashboard rather than in the blueprint.
 
 | Repo | Role |
 |---|---|
-| [payflow-contract](https://github.com/titilope12/payflow-contract) | Soroban contracts this service indexes |
-| [payflow-backend](https://github.com/titilope12/payflow-backend) | This repo |
-| [payflow-frontend](https://github.com/titilope12/payflow-frontend) | Consumes this API |
+| [payflow-contract](https://github.com/MMM-pay/payflow-contract) | Soroban contracts this service indexes |
+| [payflow-backend](https://github.com/MMM-pay/payflow-backend) | This repo |
+| [payflow-frontend](https://github.com/MMM-pay/payflow-frontend) | Consumes this API |
 
 ## Contributing
 
@@ -150,8 +150,8 @@ See [SECURITY.md](SECURITY.md). Unaudited, testnet only.
 
 ## Contributors
 
-<a href="https://github.com/titilope12/payflow-backend/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=titilope12/payflow-backend"/>
+<a href="https://github.com/MMM-pay/payflow-backend/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=MMM-pay/payflow-backend"/>
 </a>
 
 ## License
