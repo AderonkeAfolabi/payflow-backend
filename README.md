@@ -53,15 +53,38 @@ replays that range on restart. Every write is designed for that:
 ```bash
 npm install
 cp .env.example .env      # already points at the deployed testnet contracts
-npm test                  # 20 tests, no network needed
+npm test                  # 39 tests, no network needed
 npm run dev
 ```
 
-Backfill once without starting the server:
+Index until caught up with the network, then exit (cron, backfills):
 
 ```bash
 npm run indexer
 ```
+
+Run one settlement pass and exit (needs `KEEPER_SECRET`):
+
+```bash
+npm run keeper
+```
+
+### How the loops behave
+
+- **No overlapping passes.** Each loop schedules its next pass only after the
+  current one finishes, so a slow backfill cannot race itself on the cursor
+  and the keeper cannot submit two transactions with the same sequence number.
+- **Where indexing starts.** The saved cursor; with none, `INDEXER_START_LEDGER`
+  (the ledger the contracts were deployed at); with neither, the oldest ledger
+  the RPC node still serves. A cursor older than the node's retention window is
+  moved forward with a warning, since RPC rejects ranges that start before it.
+- **Exact ranges.** Each pass reads `[cursor, cursor + 8000)` and never the
+  ledger RPC is still closing, and it keeps paging until a page is empty or
+  passes the range end: a short page does not mean the range is exhausted.
+- **Failing mandates back off.** A mandate whose charge fails (usually an
+  empty vault) is retried after 1 minute, then 2, 4 and so on up to 6 hours. A
+  success clears it. Without this, 25 underfunded mandates at the front of the
+  queue would block every other mandate.
 
 ## API
 
@@ -70,7 +93,7 @@ Base path `/api`. All amounts are strings in the token's smallest unit
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/health` | Service status and the contract IDs it is wired to |
+| `GET` | `/health` | Status (`starting`, `ok`, `catching_up`), indexer cursor and lag, contract IDs |
 | `GET` | `/api/plans?merchant=&limit=` | Published plans |
 | `GET` | `/api/plans/:id` | One plan |
 | `GET` | `/api/mandates?subscriber=&merchant=&status=` | Mandates |
@@ -110,7 +133,7 @@ plan therefore produces a very large figure; that is arithmetic, not a bug.
 | `KEEPER_SECRET` | — | `S...` key that pays settlement fees. Required when the keeper is on |
 | `KEEPER_INTERVAL_MS` | `60000` | Settlement poll interval |
 | `INDEXER_INTERVAL_MS` | `10000` | Indexing poll interval |
-| `INDEXER_START_LEDGER` | `0` | `0` starts from the oldest ledger RPC still serves |
+| `INDEXER_START_LEDGER` | `0` | Where to start with no saved cursor. `0` starts from the oldest ledger RPC still serves |
 | `DATABASE_PATH` | `./payflow.db` | SQLite file |
 | `PORT` | `8080` | HTTP port |
 | `CORS_ORIGIN` | `*` | Comma-separated allowed origins |
@@ -120,10 +143,18 @@ The keeper is **off** by default. Turning it on requires funding
 
 ## Deployment
 
-`render.yaml` is a working Render blueprint: Node 22, a 1 GB disk mounted at
-`/var/data` for the SQLite file, and `/health` as the health check. Set
-`CORS_ORIGIN` to your deployed frontend URL and `KEEPER_SECRET` in the
-dashboard rather than in the blueprint.
+**API.** `render.yaml` is a Render blueprint for the free plan: Node 22 and
+`/health` as the health check. The free plan has no disk, so the SQLite
+projection is rebuilt from `INDEXER_START_LEDGER` after each restart, which
+takes seconds while the deployment ledger is within RPC retention (about 7
+days on testnet). On a paid plan, add a disk and point `DATABASE_PATH` at it.
+
+**Keeper.** [`.github/workflows/keeper.yml`](.github/workflows/keeper.yml)
+settles due testnet mandates roughly every 15 minutes from GitHub Actions,
+using the `KEEPER_SECRET` repository secret, and caches its projection between
+runs. A free web service sleeps when idle, so it is not a reliable place for
+the keeper. The key only pays fees: if the workflow stops, anyone can still
+call `charge`.
 
 ## Related repositories
 
@@ -132,11 +163,13 @@ dashboard rather than in the blueprint.
 | [payflow-contract](https://github.com/MMM-pay/payflow-contract) | Soroban contracts this service indexes |
 | [payflow-backend](https://github.com/MMM-pay/payflow-backend) | This repo |
 | [payflow-frontend](https://github.com/MMM-pay/payflow-frontend) | Consumes this API |
+| [payflow-docs](https://github.com/MMM-pay/payflow-docs) | Protocol documentation |
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). CI runs `typecheck`, `test`, and
-`build`; all three must pass.
+See [CONTRIBUTING.md](CONTRIBUTING.md). CI runs `lint`, `typecheck`, `test`
+and `build`; all four must pass. Changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 
