@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test, describe, beforeEach } from "node:test";
-import { openDatabase } from "../src/lib/db.ts";
+import { DatabaseSync } from "node:sqlite";
+import { migrate, openDatabase } from "../src/lib/db.ts";
 import { Indexer } from "../src/indexer.ts";
 import type { DecodedEvent } from "../src/lib/stellar.ts";
 
@@ -25,6 +26,7 @@ const planCreated = event("plan_created", [MERCHANT, 1n], {
   token: TOKEN,
   amount: 10_000_000n,
   period: 2_592_000n,
+  name: "Pro Monthly",
 });
 
 const subscribed = event("subscribed", [1n, SUBSCRIBER, MERCHANT], {
@@ -33,6 +35,7 @@ const subscribed = event("subscribed", [1n, SUBSCRIBER, MERCHANT], {
   period: 2_592_000n,
   next_charge: 1_700_000_000n,
   max_charges: 0,
+  fee_bps: 100,
 });
 
 function charged(chargesMade: number, nextCharge: number, txHash: string): DecodedEvent {
@@ -63,6 +66,28 @@ describe("indexer projections", () => {
     assert.equal(row.amount, "10000000");
     assert.equal(row.period, 2_592_000);
     assert.equal(row.active, 1);
+    assert.equal(row.name, "Pro Monthly");
+  });
+
+  test("projects a plan with no name as an empty label", () => {
+    // The contract allows an empty name; the UI falls back to the plan number.
+    ix.apply(event("plan_created", [MERCHANT, 2n], {
+      token: TOKEN,
+      amount: 1n,
+      period: 60n,
+      name: "",
+    }));
+    const row = d.prepare("SELECT name FROM plans WHERE id = 2").get() as Record<string, unknown>;
+    assert.equal(row.name, "");
+  });
+
+  test("projects the fee rate frozen into a mandate", () => {
+    ix.apply(subscribed);
+    const row = d.prepare("SELECT fee_bps FROM mandates WHERE id = 1").get() as Record<
+      string,
+      unknown
+    >;
+    assert.equal(row.fee_bps, 100);
   });
 
   test("deactivating a plan flips the flag", () => {
@@ -197,5 +222,31 @@ describe("indexer projections", () => {
     ix.apply(event("some_future_event", [], { x: 1n }));
     const rows = d.prepare("SELECT * FROM mandates").all();
     assert.equal(rows.length, 0);
+  });
+});
+
+describe("schema migration", () => {
+  test("adds columns to a database created before they existed", () => {
+    // Reproduce the pre-migration shape, which is what a deployed indexer
+    // already has on disk: CREATE TABLE IF NOT EXISTS would skip it silently.
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(`CREATE TABLE plans (
+      id INTEGER PRIMARY KEY, merchant TEXT NOT NULL, token TEXT NOT NULL,
+      amount TEXT NOT NULL, period INTEGER NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1, ledger INTEGER NOT NULL)`);
+    raw.exec("INSERT INTO plans VALUES (7, 'M', 'T', '100', 60, 1, 1)");
+
+    migrate(raw);
+
+    const row = raw.prepare("SELECT * FROM plans WHERE id = 7").get() as Record<string, unknown>;
+    assert.equal(row.name, "", "existing rows get the default, not null");
+    assert.equal(row.amount, "100", "existing data survives");
+
+    // Running it again must be a no-op rather than an error.
+    migrate(raw);
+    assert.equal(
+      (raw.prepare("SELECT COUNT(*) AS n FROM plans").get() as { n: number }).n,
+      1,
+    );
   });
 });

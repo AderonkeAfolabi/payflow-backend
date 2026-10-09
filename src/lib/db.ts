@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS cursor (
 CREATE TABLE IF NOT EXISTS plans (
   id          INTEGER PRIMARY KEY,
   merchant    TEXT    NOT NULL,
+  name        TEXT    NOT NULL DEFAULT '',
   token       TEXT    NOT NULL,
   amount      TEXT    NOT NULL,
   period      INTEGER NOT NULL,
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS mandates (
   last_charge  INTEGER NOT NULL DEFAULT 0,
   charges_made INTEGER NOT NULL DEFAULT 0,
   max_charges  INTEGER NOT NULL DEFAULT 0,
+  fee_bps      INTEGER NOT NULL DEFAULT 0,
   status       TEXT    NOT NULL DEFAULT 'Active',
   ledger       INTEGER NOT NULL
 );
@@ -76,11 +78,36 @@ CREATE TABLE IF NOT EXISTS vault_events (
 CREATE INDEX IF NOT EXISTS vault_events_user ON vault_events(user);
 `;
 
+/**
+ * Columns added after the first deployment. CREATE TABLE IF NOT EXISTS leaves
+ * an existing table alone, so new columns have to be added explicitly. Each
+ * entry is applied only when absent, which keeps repeated startups a no-op.
+ */
+const ADDED_COLUMNS: ReadonlyArray<[table: string, column: string, decl: string]> = [
+  ["plans", "name", "TEXT NOT NULL DEFAULT ''"],
+  ["mandates", "fee_bps", "INTEGER NOT NULL DEFAULT 0"],
+];
+
+export function migrate(db: DatabaseSync): void {
+  for (const [table, column, decl] of ADDED_COLUMNS) {
+    const columns = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as {
+      name: string;
+    }[];
+    // An empty result means the table itself is absent, so there is nothing to
+    // migrate -- SCHEMA will have created it with the column already present.
+    if (columns.length === 0) continue;
+    if (!columns.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    }
+  }
+}
+
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

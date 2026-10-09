@@ -107,15 +107,17 @@ export class Indexer {
     const [merchant, planId] = e.topics;
     this.db
       .prepare(
-        `INSERT INTO plans (id, merchant, token, amount, period, active, ledger)
-         VALUES (?, ?, ?, ?, ?, 1, ?)
+        `INSERT INTO plans (id, merchant, name, token, amount, period, active, ledger)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?)
          ON CONFLICT(id) DO UPDATE SET
-           merchant = excluded.merchant, token = excluded.token,
+           merchant = excluded.merchant, name = excluded.name,
+           token = excluded.token,
            amount = excluded.amount, period = excluded.period`,
       )
       .run(
         num(planId),
         str(merchant),
+        str(e.data.name),
         str(e.data.token),
         big(e.data.amount),
         num(e.data.period),
@@ -136,12 +138,13 @@ export class Indexer {
       .prepare(
         `INSERT INTO mandates
            (id, subscriber, merchant, plan_id, amount, period, next_charge,
-            last_charge, charges_made, max_charges, status, ledger)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 'Active', ?)
+            last_charge, charges_made, max_charges, fee_bps, status, ledger)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 'Active', ?)
          ON CONFLICT(id) DO UPDATE SET
            subscriber  = excluded.subscriber,
            merchant    = excluded.merchant,
-           max_charges = excluded.max_charges`,
+           max_charges = excluded.max_charges,
+           fee_bps     = excluded.fee_bps`,
       )
       .run(
         num(mandateId),
@@ -152,6 +155,7 @@ export class Indexer {
         num(e.data.period),
         num(e.data.next_charge),
         num(e.data.max_charges),
+        num(e.data.fee_bps),
         e.ledger,
       );
   }
