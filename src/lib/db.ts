@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS mandates (
   max_charges  INTEGER NOT NULL DEFAULT 0,
   fee_bps      INTEGER NOT NULL DEFAULT 0,
   status       TEXT    NOT NULL DEFAULT 'Active',
+  -- 'subscriber' or 'merchant' once cancelled; NULL otherwise.
+  ended_by     TEXT,
   ledger       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mandates_subscriber ON mandates(subscriber);
@@ -86,6 +88,7 @@ CREATE INDEX IF NOT EXISTS vault_events_user ON vault_events(user);
 const ADDED_COLUMNS: ReadonlyArray<[table: string, column: string, decl: string]> = [
   ["plans", "name", "TEXT NOT NULL DEFAULT ''"],
   ["mandates", "fee_bps", "INTEGER NOT NULL DEFAULT 0"],
+  ["mandates", "ended_by", "TEXT"],
 ];
 
 export function migrate(db: DatabaseSync): void {

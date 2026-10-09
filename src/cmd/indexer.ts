@@ -1,4 +1,4 @@
-/** Run a single indexing pass and exit. Useful for cron and for backfills. */
+/** Index until caught up with the network, then exit. For cron and backfills. */
 import { loadConfig } from "../config.ts";
 import { openDatabase } from "../lib/db.ts";
 import { makeRpc } from "../lib/stellar.ts";
@@ -10,7 +10,7 @@ const db = openDatabase(config.DATABASE_PATH);
 const indexer = new Indexer(db, makeRpc(config), config);
 
 indexer
-  .tick()
+  .catchUp()
   .then((n) => {
     logger.info({ events: n }, "backfill complete");
     db.close();

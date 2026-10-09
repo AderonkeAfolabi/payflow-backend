@@ -20,6 +20,7 @@ const config = {
 } as unknown as Config;
 
 let server: Server;
+const status = { cursor: 1_000, latest: 1_010, lastRunAt: Date.now(), lastError: null };
 let base: string;
 const db = openDatabase(":memory:");
 
@@ -37,7 +38,7 @@ before(async () => {
     amount: 9_900_000n, fee: 100_000n, charges_made: 1n, next_charge: 4_000_000_000n,
   }, "tx1"));
 
-  const app = createApp(db, config);
+  const app = createApp(db, config, status);
   await new Promise<void>((resolve) => {
     server = app.listen(0, () => {
       const addr = server.address();
@@ -62,6 +63,24 @@ describe("http api", () => {
     const { status, body } = await get("/health");
     assert.equal(status, 200);
     assert.equal(body.status, "ok");
+  });
+
+  test("health reports indexer lag", async () => {
+    const { body } = await get("/health");
+    const ix = body.indexer as unknown as { cursor: number; lag: number };
+    assert.equal(ix.cursor, 1_000);
+    assert.equal(ix.lag, 10);
+  });
+
+  test("health says catching_up while far behind, but stays 200", async () => {
+    status.latest = 50_000;
+    try {
+      const res = await get("/health");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.status, "catching_up");
+    } finally {
+      status.latest = 1_010;
+    }
   });
 
   test("lists plans and filters by merchant", async () => {

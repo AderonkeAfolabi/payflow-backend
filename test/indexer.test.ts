@@ -191,6 +191,22 @@ describe("indexer projections", () => {
     assert.equal(row.status, "Completed");
   });
 
+  test("a merchant ending a mandate cancels it and records who ended it", () => {
+    ix.apply(subscribed);
+    ix.apply(event("mandate_ended", [1n, MERCHANT], { subscriber: SUBSCRIBER, charges_made: 0 }));
+    const row = d.prepare("SELECT status, ended_by FROM mandates WHERE id = 1").get() as Record<string, unknown>;
+    assert.equal(row.status, "Cancelled");
+    assert.equal(row.ended_by, "merchant");
+  });
+
+  test("a subscriber cancel records the subscriber as the one who ended it", () => {
+    ix.apply(subscribed);
+    ix.apply(event("cancelled", [1n, SUBSCRIBER], { charges_made: 0 }));
+    const row = d.prepare("SELECT status, ended_by FROM mandates WHERE id = 1").get() as Record<string, unknown>;
+    assert.equal(row.status, "Cancelled");
+    assert.equal(row.ended_by, "subscriber");
+  });
+
   test("pause toggles only from active states", () => {
     ix.apply(subscribed);
     ix.apply(event("pause_changed", [1n, SUBSCRIBER], { paused: true }));

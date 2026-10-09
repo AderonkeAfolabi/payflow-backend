@@ -3,20 +3,36 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { pinoHttp } from "pino-http";
 import type { DatabaseSync } from "node:sqlite";
 import type { Config } from "./config.ts";
+import type { IndexerStatus } from "./indexer.ts";
 import { buildRoutes } from "./routes/index.ts";
 import { logger } from "./lib/logger.ts";
 
-export function createApp(db: DatabaseSync, config: Config): Express {
+/** Ledgers the indexer may trail the network by before /health reports it. */
+const MAX_LAG = 120;
+
+export function createApp(db: DatabaseSync, config: Config, indexer?: IndexerStatus): Express {
   const app = express();
 
   app.use(pinoHttp({ logger }));
   app.use(cors({ origin: config.CORS_ORIGIN === "*" ? true : config.CORS_ORIGIN.split(",") }));
   app.use(express.json({ limit: "64kb" }));
 
+  // Always 200 so a slow backfill does not get the service restarted; the
+  // body says whether the projection is current.
   app.get("/health", (_req, res) => {
+    const lag = indexer && indexer.latest > 0 ? Math.max(0, indexer.latest - indexer.cursor) : null;
     res.json({
-      status: "ok",
+      status: lag === null ? "starting" : lag <= MAX_LAG ? "ok" : "catching_up",
       network: config.STELLAR_NETWORK,
+      indexer: indexer
+        ? {
+            cursor: indexer.cursor,
+            latestLedger: indexer.latest,
+            lag,
+            lastRunAt: indexer.lastRunAt ? new Date(indexer.lastRunAt).toISOString() : null,
+            lastError: indexer.lastError,
+          }
+        : null,
       contracts: {
         planRegistry: config.PLAN_REGISTRY_ID,
         vault: config.VAULT_ID,
