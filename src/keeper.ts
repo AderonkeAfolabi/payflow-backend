@@ -17,6 +17,19 @@ export interface DueMandate {
   next_charge: number;
 }
 
+/** The RPC calls the keeper makes. Narrow so tests can supply a fake. */
+export type KeeperRpc = Pick<
+  rpc.Server,
+  "getAccount" | "prepareTransaction" | "sendTransaction" | "getTransaction"
+>;
+
+/** First retry delay after a failed charge; doubles per failure. */
+const BACKOFF_BASE_S = 60;
+/** Longest a failing mandate waits between attempts. */
+const BACKOFF_MAX_S = 6 * 60 * 60;
+/** Most charges submitted in one pass. */
+const BATCH = 25;
+
 export interface SettleResult {
   mandateId: number;
   status: "settled" | "failed";
@@ -35,10 +48,16 @@ export interface SettleResult {
 export class Keeper {
   private readonly keypair: Keypair;
   private readonly db: DatabaseSync;
-  private readonly server: rpc.Server;
+  private readonly server: KeeperRpc;
   private readonly config: Config;
+  /**
+   * Mandates whose last charge failed, with when to try again. Without this,
+   * the oldest due mandates are retried first on every pass, so a batch's
+   * worth of underfunded vaults would block every other mandate forever.
+   */
+  private readonly backoff = new Map<number, { failures: number; retryAt: number }>();
 
-  constructor(db: DatabaseSync, server: rpc.Server, config: Config) {
+  constructor(db: DatabaseSync, server: KeeperRpc, config: Config) {
     this.db = db;
     this.server = server;
     this.config = config;
@@ -52,8 +71,23 @@ export class Keeper {
     return this.keypair.publicKey();
   }
 
-  /** Mandates the indexer believes are chargeable right now. */
-  findDue(now: number = Math.floor(Date.now() / 1000), limit = 25): DueMandate[] {
+  /**
+   * Mandates the indexer believes are chargeable right now, oldest first,
+   * skipping any that are backing off after a failed charge.
+   */
+  findDue(now: number = Math.floor(Date.now() / 1000), limit = BATCH): DueMandate[] {
+    const due: DueMandate[] = [];
+    // Read past the backing-off mandates so they cannot fill the batch.
+    for (const m of this.queryDue(now, limit + this.backoff.size)) {
+      const wait = this.backoff.get(m.id);
+      if (wait && wait.retryAt > now) continue;
+      due.push(m);
+      if (due.length === limit) break;
+    }
+    return due;
+  }
+
+  private queryDue(now: number, limit: number): DueMandate[] {
     return this.db
       .prepare(
         `SELECT id, subscriber, merchant, next_charge
@@ -67,13 +101,31 @@ export class Keeper {
       .all(now, limit) as unknown as DueMandate[];
   }
 
-  async tick(): Promise<SettleResult[]> {
-    const due = this.findDue();
+  async tick(now: number = Math.floor(Date.now() / 1000)): Promise<SettleResult[]> {
+    const due = this.findDue(now);
     const results: SettleResult[] = [];
     for (const mandate of due) {
-      results.push(await this.settle(mandate.id));
+      const result = await this.settle(mandate.id);
+      this.record(result, now);
+      results.push(result);
     }
     return results;
+  }
+
+  /** Seconds until `mandateId` is next attempted; 0 when not backing off. */
+  retryIn(mandateId: number, now: number = Math.floor(Date.now() / 1000)): number {
+    const wait = this.backoff.get(mandateId);
+    return wait ? Math.max(0, wait.retryAt - now) : 0;
+  }
+
+  private record(result: SettleResult, now: number): void {
+    if (result.status === "settled") {
+      this.backoff.delete(result.mandateId);
+      return;
+    }
+    const failures = (this.backoff.get(result.mandateId)?.failures ?? 0) + 1;
+    const delay = Math.min(BACKOFF_BASE_S * 2 ** (failures - 1), BACKOFF_MAX_S);
+    this.backoff.set(result.mandateId, { failures, retryAt: now + delay });
   }
 
   /**
