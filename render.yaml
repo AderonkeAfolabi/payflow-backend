@@ -3,6 +3,17 @@
 # The indexer and keeper run inside the same process as the API (see
 # src/index.ts), so a single web service is enough at this scale. Split the
 # keeper into its own worker before running more than a few hundred mandates.
+#
+# The free plan has no persistent disk, so the SQLite projection lives on the
+# instance's own filesystem and is rebuilt from INDEXER_START_LEDGER after each
+# restart. That takes a few seconds, but only works while the start ledger is
+# inside the RPC node's retention window (about 7 days on testnet). For a
+# longer-lived deployment, use a paid plan with a disk and point
+# DATABASE_PATH at it.
+#
+# Settlement is done by the scheduled keeper workflow in
+# .github/workflows/keeper.yml, because a free instance sleeps when idle. Set
+# KEEPER_ENABLED to "true" and KEEPER_SECRET here only on an always-on plan.
 services:
   - type: web
     name: payflow-backend
@@ -23,20 +34,18 @@ services:
       - key: NETWORK_PASSPHRASE
         value: Test SDF Network ; September 2015
       - key: PLAN_REGISTRY_ID
-        value: CAW6NLCTOHINSEGCKZDKLNWIQHXB5E6XKY7C5FSK7PRKNOEYT5PPI26K
+        value: CDQ5EJTVXXX2CBMHWP3BGGUDHSK6D4I25IF5XXH3QGL2TNTBMJUOFKDB
       - key: VAULT_ID
-        value: CCCRRJHVT5ILHRM72E7Y73IUHBMW5N7GF6KEMRVY3BE4RCSYWTIW57YZ
+        value: CBNQEWSYYQOKNX5KB62OFT6ID5TCVSWN4PS4AXAJK6IWUEXOLVN6DXII
       - key: SUBSCRIPTION_ID
-        value: CC5PF5RPV6B4SZH4D2JSEZWRZHN3MHOD5BXQJEGDH6E2UUY26X5TBS7N
+        value: CD5YZUJU6WLFIHGAV4J2BV42GCVZE5ZGDUGSW5CBRIA47TQHSZZW3XMM
+      - key: INDEXER_START_LEDGER
+        value: "5110418"
       - key: DATABASE_PATH
-        value: /var/data/payflow.db
+        value: ./payflow.db
       - key: KEEPER_ENABLED
         value: "false"
       - key: KEEPER_SECRET
         sync: false
       - key: CORS_ORIGIN
-        sync: false
-    disk:
-      name: payflow-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: https://mmm-pay.github.io

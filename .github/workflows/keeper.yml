@@ -1,0 +1,62 @@
+name: Keeper
+
+# Settles due testnet mandates on a schedule, so billing on the public demo
+# keeps moving without an always-on server. `charge` is permissionless and the
+# keeper key holds only XLM for fees: if this workflow stops, anyone can still
+# settle a due mandate, and nothing is lost beyond timeliness.
+#
+# Requires the repository secret KEEPER_SECRET (a funded testnet S... key).
+
+on:
+  schedule:
+    # GitHub runs scheduled jobs late when it is busy; treat this as "roughly
+    # every quarter hour", not a precise clock.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keeper
+  cancel-in-progress: false
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      STELLAR_NETWORK: testnet
+      SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+      NETWORK_PASSPHRASE: Test SDF Network ; September 2015
+      PLAN_REGISTRY_ID: CDQ5EJTVXXX2CBMHWP3BGGUDHSK6D4I25IF5XXH3QGL2TNTBMJUOFKDB
+      VAULT_ID: CBNQEWSYYQOKNX5KB62OFT6ID5TCVSWN4PS4AXAJK6IWUEXOLVN6DXII
+      SUBSCRIPTION_ID: CD5YZUJU6WLFIHGAV4J2BV42GCVZE5ZGDUGSW5CBRIA47TQHSZZW3XMM
+      INDEXER_START_LEDGER: "5110418"
+      DATABASE_PATH: ./keeper.db
+      KEEPER_ENABLED: "true"
+      KEEPER_SECRET: ${{ secrets.KEEPER_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      # Restore the projection from the previous run so each run only indexes
+      # the ledgers since then. A cache miss just means a full re-index.
+      - uses: actions/cache/restore@v4
+        with:
+          path: keeper.db
+          key: keeper-db-${{ env.SUBSCRIPTION_ID }}-${{ github.run_id }}
+          restore-keys: keeper-db-${{ env.SUBSCRIPTION_ID }}-
+      - name: Index
+        run: npm run indexer
+      - name: Settle due mandates
+        if: env.KEEPER_SECRET != ''
+        run: npm run keeper
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: keeper.db
+          key: keeper-db-${{ env.SUBSCRIPTION_ID }}-${{ github.run_id }}
