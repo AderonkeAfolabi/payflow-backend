@@ -4,6 +4,10 @@ import { readCursor } from "../lib/db.ts";
 
 const MAX_LIMIT = 200;
 
+/** Both recurring-revenue figures normalise each mandate's period to these. */
+const SECONDS_PER_MONTH = 2_592_000; // a 30-day month
+const SECONDS_PER_YEAR = 31_536_000; // a 365-day year
+
 function limitOf(raw: unknown, fallback = 50): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return fallback;
@@ -101,20 +105,24 @@ export function buildRoutes(db: DatabaseSync): Router {
         "SELECT COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS total, COUNT(*) AS n FROM charges WHERE merchant = ?",
       )
       .get(address) as { total: number; n: number };
-    // Monthly recurring revenue, normalised from each mandate's own period.
-    const mrr = db
+    // Recurring revenue, normalised from each mandate's own period: MRR over a
+    // 30-day month and ARR over a 365-day year. Integer division truncates,
+    // which is fine at base-unit (stroop) scale.
+    const recurring = db
       .prepare(
-        `SELECT COALESCE(SUM(CAST(amount AS INTEGER) * 2592000 / period), 0) AS mrr
+        `SELECT COALESCE(SUM(CAST(amount AS INTEGER) * ${SECONDS_PER_MONTH} / period), 0) AS mrr,
+                COALESCE(SUM(CAST(amount AS INTEGER) * ${SECONDS_PER_YEAR} / period), 0) AS arr
            FROM mandates WHERE merchant = ? AND status = 'Active' AND period > 0`,
       )
-      .get(address) as { mrr: number };
+      .get(address) as { mrr: number; arr: number };
 
     res.json({
       merchant: address,
       activeMandates: active.n,
       totalCollected: String(collected.total),
       chargeCount: collected.n,
-      mrr: String(mrr.mrr),
+      mrr: String(recurring.mrr),
+      arr: String(recurring.arr),
     });
   });
 
