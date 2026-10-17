@@ -341,9 +341,20 @@ describe("loop", () => {
       passes += 1;
     });
     await new Promise((r) => setTimeout(r, 400));
-    loop.stop();
+    await loop.stop();
     assert.ok(passes >= 2, "the loop kept going");
     assert.equal(maxRunning, 1);
+  });
+
+  test("stop waits for a slow pass in flight", async () => {
+    let finished = false;
+    const loop = every(1, async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      finished = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    await loop.stop();
+    assert.equal(finished, true);
   });
 
   test("keeps going after a pass throws", async () => {
@@ -353,7 +364,7 @@ describe("loop", () => {
       throw new Error("boom");
     });
     await new Promise((r) => setTimeout(r, 150));
-    loop.stop();
+    await loop.stop();
     assert.ok(passes >= 2);
   });
 });
