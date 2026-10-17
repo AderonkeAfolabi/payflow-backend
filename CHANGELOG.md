@@ -4,6 +4,14 @@ All notable changes to payflow-backend. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`arr` on the merchant summary.** `/api/merchants/:address/summary` now
+  reports annual recurring revenue next to `mrr`: every active mandate
+  normalised to a 365-day year. Both formulas are documented in the README.
+
 ## [0.2.0] - 2026-10-09
 
 Points at the v0.2.0 contract suite on testnet.

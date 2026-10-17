@@ -9,6 +9,7 @@ import type { DecodedEvent } from "../src/lib/stellar.ts";
 
 const MERCHANT = "GB343X4K4TIYARSAAQZ55RIZY2YLFNOQCM3LNQSRBV56TMVGIF55WCOH";
 const SUBSCRIBER = "GAIJKXL3Q45ZR32QRDVPUDD4DPLT5GYCHJFESQPHHWJRYX4YZCG25JJR";
+const YEARLY_MERCHANT = "GDLXOW3J5FEFW4UZ7XBHX6EFHL7POV7S2NG5RZ7ULYCGLJWGPUBFQO4U";
 
 const config = {
   STELLAR_NETWORK: "testnet",
@@ -37,6 +38,12 @@ before(async () => {
   ix.apply(ev("charged", [1n, SUBSCRIBER, MERCHANT], {
     amount: 9_900_000n, fee: 100_000n, charges_made: 1n, next_charge: 4_000_000_000n,
   }, "tx1"));
+
+  // A yearly plan: one charge of 120_000_000 per 365-day period, next charge
+  // far in the future so it never lands in the due list.
+  ix.apply(ev("subscribed", [2n, SUBSCRIBER, YEARLY_MERCHANT], {
+    plan_id: 1n, amount: 120_000_000n, period: 31_536_000n, next_charge: 4_000_000_000n,
+  }, "tx2"));
 
   const app = createApp(db, config, status);
   await new Promise<void>((resolve) => {
@@ -104,12 +111,22 @@ describe("http api", () => {
     assert.equal((body.charges as unknown[]).length, 1);
   });
 
-  test("merchant summary computes MRR and revenue", async () => {
+  test("merchant summary computes MRR, ARR and revenue", async () => {
     const { body } = await get(`/api/merchants/${MERCHANT}/summary`);
     assert.equal(body.activeMandates, 1);
     assert.equal(body.totalCollected, "9900000");
-    // 10_000_000 per 30-day period normalises to itself
+    // 10_000_000 per 30-day period normalises to itself, twelve times a year
     assert.equal(body.mrr, "10000000");
+    assert.equal(body.arr, "121666666");
+  });
+
+  test("yearly plan fixture gives the expected ARR", async () => {
+    const { body } = await get(`/api/merchants/${YEARLY_MERCHANT}/summary`);
+    assert.equal(body.activeMandates, 1);
+    // 120_000_000 per 365-day period is the ARR itself...
+    assert.equal(body.arr, "120000000");
+    // ...and the same amount normalised to a 30-day month is smaller than ARR.
+    assert.equal(body.mrr, "9863013");
   });
 
   test("subscriber summary includes fee in total paid", async () => {
@@ -125,7 +142,7 @@ describe("http api", () => {
   test("stats reflect indexed state", async () => {
     const { body } = await get("/api/stats");
     assert.equal(body.plans, 1);
-    assert.equal(body.mandates, 1);
+    assert.equal(body.mandates, 2);
     assert.equal(body.charges, 1);
   });
 

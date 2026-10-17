@@ -100,7 +100,7 @@ Base path `/api`. All amounts are strings in the token's smallest unit
 | `GET` | `/api/mandates/:id` | One mandate |
 | `GET` | `/api/mandates/:id/charges` | Settlement history |
 | `GET` | `/api/due` | Mandates chargeable right now |
-| `GET` | `/api/merchants/:address/summary` | Active mandates, revenue, MRR |
+| `GET` | `/api/merchants/:address/summary` | Active mandates, revenue, MRR and ARR |
 | `GET` | `/api/subscribers/:address/summary` | Mandates and total paid |
 | `GET` | `/api/stats` | Protocol totals and last indexed ledger |
 
@@ -113,12 +113,22 @@ curl localhost:8080/api/merchants/GB343X.../summary
   "activeMandates": 1,
   "totalCollected": "19800000",
   "chargeCount": 2,
-  "mrr": "432000000000"
+  "mrr": "432000000000",
+  "arr": "5256000000000"
 }
 ```
 
-`mrr` normalises every active mandate to a 30-day month. A short-period demo
-plan therefore produces a very large figure; that is arithmetic, not a bug.
+`mrr` and `arr` normalise every active mandate's own period to a 30-day month
+(2,592,000 s) and a 365-day year (31,536,000 s) respectively:
+
+```
+mrr = sum(amount × 2592000 / period)   over active mandates
+arr = sum(amount × 31536000 / period)  over active mandates
+```
+
+A yearly plan of 120,000000 stroops therefore reports `arr` of 120000000 and
+an `mrr` of 9863013. A short-period demo plan produces a very large figure;
+that is arithmetic, not a bug.
 
 ## Configuration
 
