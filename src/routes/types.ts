@@ -137,6 +137,10 @@ export interface HealthResponse {
     /** Contract events that failed spec validation since process start. */
     mismatchedEvents: number;
   } | null;
+  rpc?: {
+    active: string;
+    endpoints: readonly string[];
+  } | null;
   contracts: {
     planRegistry: string;
     vault: string;
