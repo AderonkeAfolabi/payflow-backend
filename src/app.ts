@@ -7,6 +7,7 @@ import type { Config, NetworkConfig } from "./config.ts";
 import type { IndexerStatus } from "./indexer.ts";
 import { buildAdminRoutes, type AdminHooks } from "./routes/admin.ts";
 import { buildApiRouter, MerchantSummaryCache } from "./routes/index.ts";
+import { asReader, TokenMetadataService } from "./lib/tokens.ts";
 import { sendApiError } from "./routes/errors.ts";
 import type { HealthResponse } from "./routes/types.ts";
 import type { RpcStatus } from "./lib/stellar.ts";
@@ -89,6 +90,9 @@ export interface NetworkRuntime {
   indexer?: IndexerStatus | undefined;
   summaryCache?: MerchantSummaryCache | undefined;
   rpc?: RpcStatus | undefined;
+  /** Token metadata source; without one the network's native asset still
+   * resolves and every other token reports unavailable (never the network). */
+  tokens?: TokenMetadataService | undefined;
 }
 
 function healthOf(runtime: NetworkRuntime): HealthResponse {
@@ -134,20 +138,21 @@ export function createApp(
   db: DatabaseSync,
   config: Config,
   indexer?: IndexerStatus,
-  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks,
-  arg4?: RpcStatus | AdminHooks,
-  arg5?: AdminHooks,
+  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks | TokenMetadataService,
+  arg4?: RpcStatus | AdminHooks | TokenMetadataService,
+  arg5?: AdminHooks | TokenMetadataService,
 ): Express;
 export function createApp(
   dbOrRuntimes: DatabaseSync | NetworkRuntime[],
   config: Config,
   arg2?: IndexerStatus | AdminHooks,
-  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks,
-  arg4?: RpcStatus | AdminHooks,
-  arg5?: AdminHooks,
+  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks | TokenMetadataService,
+  arg4?: RpcStatus | AdminHooks | TokenMetadataService,
+  arg5?: AdminHooks | TokenMetadataService,
 ): Express {
   let runtimes: NetworkRuntime[];
   let admin: AdminHooks | undefined;
+  let tokens: TokenMetadataService | undefined;
   const isMulti = Array.isArray(dbOrRuntimes);
 
   if (isMulti) {
@@ -161,10 +166,14 @@ export function createApp(
     let merchantCache: MerchantSummaryCache | undefined;
     let rpc: RpcStatus | undefined;
 
+    // The collaborators are optional and positional, so each one is
+    // identified by its type instead of by the slot it was passed in.
     for (const arg of [arg3, arg4, arg5]) {
       if (!arg) continue;
       if (arg instanceof MerchantSummaryCache) {
         merchantCache = arg;
+      } else if (arg instanceof TokenMetadataService) {
+        tokens = arg;
       } else if ("active" in arg && Array.isArray((arg as RpcStatus).endpoints)) {
         rpc = arg as RpcStatus;
       } else if (typeof arg === "object") {
@@ -189,6 +198,7 @@ export function createApp(
         indexer,
         summaryCache: merchantCache,
         rpc,
+        tokens,
       },
     ];
   }
@@ -266,6 +276,16 @@ export function createApp(
     app.use("/admin", buildAdminRoutes(config.ADMIN_TOKEN, admin));
   }
 
+  // A network without a wired token metadata source falls back to a reader
+  // that reports every non-native token as unavailable, so a service started
+  // without an RPC url never reaches the network from a request handler.
+  // Native XLM still resolves from the passphrase alone.
+  const tokenServiceOf = (rt: NetworkRuntime): TokenMetadataService =>
+    rt.tokens ??
+    new TokenMetadataService(asReader(undefined), {
+      networkPassphrase: rt.config.networkPassphrase,
+    });
+
   app.use(
     "/api",
     buildApiRouter(
@@ -274,6 +294,7 @@ export function createApp(
         db: rt.db,
         summaryCache: rt.summaryCache,
         defaultToken: rt.config.defaultToken ?? config.TOKEN_ID,
+        tokens: tokenServiceOf(rt),
       })),
     ),
   );

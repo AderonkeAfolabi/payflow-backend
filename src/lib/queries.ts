@@ -63,6 +63,24 @@ export function getPlanById(db: DatabaseSync, id: number): PlanRow | undefined {
     .get(id) as unknown as PlanRow | undefined;
 }
 
+/**
+ * Batch the token contract id for a set of plan ids. A mandate carries no
+ * token of its own — it inherits its plan's — so enriching a page of
+ * mandates costs one read, not one per row. Ids are de-duped first; unknown
+ * plan ids are simply absent from the map.
+ */
+export function planTokensByIds(db: DatabaseSync, planIds: number[]): Map<number, string> {
+  const ids = [...new Set(planIds)];
+  if (ids.length === 0) return new Map();
+  const rows = db
+    // The interpolation is `?` placeholders only, one per de-duped numeric id;
+    // the ids themselves are bound parameters, never interpolated.
+    // eslint-disable-next-line no-restricted-syntax
+    .prepare(`SELECT id, token FROM plans WHERE id IN (${ids.map(() => "?").join(",")})`)
+    .all(...(ids as never[])) as unknown as { id: number; token: string }[];
+  return new Map(rows.map((row) => [row.id, row.token]));
+}
+
 /** List mandates ordered newest-first with optional id batch, subscriber, merchant, and status filters. */
 export function listMandates(
   db: DatabaseSync,

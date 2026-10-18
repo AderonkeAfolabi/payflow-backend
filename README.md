@@ -188,6 +188,8 @@ a stable `code` and show the human-readable `message` without parsing prose:
 | `mandate_not_found` | 404 | `GET /api/mandates/:id` with no such mandate |
 | `invalid_ids` | 400 | `?ids=` contains a non-positive-integer token |
 | `too_many_ids` | 400 | `?ids=` lists more than 100 ids |
+| `invalid_token_id` | 400 | `GET /api/tokens/:id` with a malformed contract id |
+| `token_metadata_unavailable` | 502 | `GET /api/tokens/:id` while the token contract cannot be read |
 | `unauthorized` | 401 | A `/admin/*` request without a valid bearer token |
 | `reindex_unavailable` | 503 | `POST /admin/reindex` on a process without an indexer |
 | `indexer_unavailable` | 503 | `/admin/indexer/pause`/`resume` on a process without an indexer |

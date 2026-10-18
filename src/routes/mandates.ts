@@ -5,8 +5,10 @@ import {
   listDueMandates,
   listMandateCharges,
   listMandates,
+  planTokensByIds,
 } from "../lib/queries.ts";
-import { limitOf } from "./helpers.ts";
+import type { TokenMetadataService } from "../lib/tokens.ts";
+import { limitOf, tokenFields } from "./helpers.ts";
 import { sendApiError } from "./errors.ts";
 import type {
   ChargePage,
@@ -36,10 +38,10 @@ function parseIds(raw: unknown): { ids: number[]; tooMany: boolean } | null {
 }
 
 /** `GET /mandates*` and the keeper-facing `GET /due`. */
-export function mandatesRouter(db: DatabaseSync): Router {
+export function mandatesRouter(db: DatabaseSync, tokens: TokenMetadataService): Router {
   const r = Router();
 
-  r.get("/mandates", (req, res) => {
+  r.get("/mandates", async (req, res) => {
     const { ids, subscriber, merchant, status } = req.query;
     let parsedIds: number[] | undefined;
     if (ids !== undefined) {
@@ -54,24 +56,34 @@ export function mandatesRouter(db: DatabaseSync): Router {
       }
       parsedIds = parsed.ids;
     }
-    const mandates = listMandates(db, {
+    const rows = listMandates(db, {
       ids: parsedIds,
       subscriber: subscriber ? String(subscriber) : undefined,
       merchant: merchant ? String(merchant) : undefined,
       status: status ? String(status) : undefined,
       limit: limitOf(req.query.limit),
     });
+    // A mandate carries no token of its own; it inherits its plan's, batched
+    // into one read per page (see lib/queries.ts).
+    const planTokens = planTokensByIds(db, rows.map((row) => row.plan_id));
+    const mandates = await Promise.all(
+      rows.map(async (row) => ({
+        ...row,
+        ...(await tokenFields(tokens, planTokens.get(row.plan_id))),
+      })),
+    );
     const body: MandatePage = { mandates };
     res.json(body);
   });
 
-  r.get("/mandates/:id", (req, res) => {
+  r.get("/mandates/:id", async (req, res) => {
     const row = getMandateById(db, Number(req.params.id));
     if (!row) {
       sendApiError(res, req, 404, "mandate_not_found");
       return;
     }
-    res.json(row);
+    const tokenId = planTokensByIds(db, [row.plan_id]).get(row.plan_id);
+    res.json({ ...row, ...(await tokenFields(tokens, tokenId)) });
   });
 
   r.get("/mandates/:id/charges", (req, res) => {

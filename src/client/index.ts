@@ -44,6 +44,8 @@ export type {
   PlanRow,
   StatsResponse,
   SubscriberSummary,
+  TokenFields,
+  TokenMetadata,
   TokenRevenue,
   UpcomingCharge,
   UpcomingChargesResponse,

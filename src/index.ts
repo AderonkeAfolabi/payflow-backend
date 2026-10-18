@@ -1,6 +1,7 @@
 import { loadConfig, networkConfigs } from "./config.ts";
 import { openDatabase } from "./lib/db.ts";
 import { makeRpc } from "./lib/stellar.ts";
+import { makeSimulationReader, TokenMetadataService } from "./lib/tokens.ts";
 import { createApp } from "./app.ts";
 import { Indexer } from "./indexer.ts";
 import { Keeper } from "./keeper.ts";
@@ -34,7 +35,13 @@ const runtimes = networks.map((network) => {
       throw err;
     }
   });
-  return { network, db, server, indexer, runPass };
+  // Token metadata is read from the token contract itself through the same
+  // RPC failover the indexer uses, cached by contract id (see lib/tokens.ts).
+  const tokens = new TokenMetadataService(
+    makeSimulationReader(server, network.networkPassphrase),
+    { networkPassphrase: network.networkPassphrase },
+  );
+  return { network, db, server, indexer, runPass, tokens };
 });
 const defaultRuntime = runtimes[0]!;
 
@@ -97,6 +104,7 @@ const app = createApp(
     indexer: rt.indexer.status,
     summaryCache: rt.indexer.merchantCache,
     rpc: rt.server,
+    tokens: rt.tokens,
   })),
   config,
   adminHooks,
