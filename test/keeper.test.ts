@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, describe } from "node:test";
-import { Account, Keypair, Transaction, scValToNative } from "@stellar/stellar-sdk";
+import { Account, Keypair, StrKey, Transaction, scValToNative } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
 import { openDatabase } from "../src/lib/db.ts";
 import { Keeper, type KeeperRpc } from "../src/keeper.ts";
@@ -18,6 +18,7 @@ const keyB = Keypair.random();
 function keeperConfig(
   secrets: { KEEPER_SECRET?: string; KEEPER_SECRET_NEXT?: string },
   order?: "oldest" | "largest",
+  fees: { KEEPER_FEE_PERCENTILE?: string; KEEPER_MAX_FEE?: string } = {},
 ): Config {
   return {
     PLAN_REGISTRY_ID: CONTRACT,
@@ -25,6 +26,9 @@ function keeperConfig(
     SUBSCRIPTION_ID: CONTRACT,
     NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
     ...(order ? { KEEPER_ORDER: order } : {}),
+    KEEPER_FEE_PERCENTILE: "90",
+    KEEPER_MAX_FEE: "100000",
+    ...fees,
     ...secrets,
   } as unknown as Config;
 }
@@ -36,6 +40,9 @@ function keeperConfig(
  */
 function fakeRpc(funded: Set<string>, submitted: string[] = []): KeeperRpc {
   return {
+    getFeeStats: async () => ({
+      sorobanInclusionFee: { p90: "1000" },
+    }) as never,
     getAccount: async (address: string) => {
       if (!funded.has(address)) {
         throw new Error(`The source account ${address} was not found`);
@@ -207,9 +214,9 @@ describe("keeper key rotation", () => {
 
   test("KEEPER_SECRET_NEXT validates through the config schema", () => {
     const env = {
-      PLAN_REGISTRY_ID: "C".repeat(56),
-      VAULT_ID: "C".repeat(56),
-      SUBSCRIPTION_ID: "C".repeat(56),
+      PLAN_REGISTRY_ID: StrKey.encodeContract(Buffer.alloc(32)),
+      VAULT_ID: StrKey.encodeContract(Buffer.alloc(32)),
+      SUBSCRIPTION_ID: StrKey.encodeContract(Buffer.alloc(32)),
       KEEPER_SECRET: keyA.secret(),
       KEEPER_SECRET_NEXT: keyB.secret(),
     };
@@ -379,6 +386,39 @@ describe("keeper due-mandate ordering", () => {
   });
 });
 
+describe("keeper congestion fee retry", () => {
+  test("retries TRY_AGAIN_LATER once and caps the higher fee", async () => {
+    const db = openDatabase(":memory:");
+    insertDue(db, 1, 1_000);
+    const fees: string[] = [];
+    let attempts = 0;
+    const server = {
+      ...fakeRpc(new Set([keyA.publicKey()])),
+      getFeeStats: async () => ({ sorobanInclusionFee: { p90: "1000" } }),
+      sendTransaction: async (tx: Transaction) => {
+        fees.push((tx as Transaction & { fee: string }).fee);
+        attempts += 1;
+        if (attempts === 1) return { status: "TRY_AGAIN_LATER" };
+        return { status: "PENDING", hash: tx.hash().toString("hex") };
+      },
+    } as unknown as KeeperRpc;
+    const keeper = new Keeper(
+      db,
+      server,
+      keeperConfig(
+        { KEEPER_SECRET: keyA.secret() },
+        undefined,
+        { KEEPER_FEE_PERCENTILE: "90", KEEPER_MAX_FEE: "1500" },
+      ),
+    );
+
+    const results = await keeper.tick(10_000);
+    assert.equal(results[0]!.status, "settled");
+    assert.deepEqual(fees, ["1000", "1500"]);
+    db.close();
+  });
+});
+
 describe("keeper settle transaction paths", () => {
   function settleKeeper(server: KeeperRpc): Keeper {
     return new Keeper(
@@ -397,7 +437,7 @@ describe("keeper settle transaction paths", () => {
     assert.deepEqual(result, {
       mandateId: 7,
       status: "failed",
-      error: '"contract rejected"',
+      error: "contract rejected",
     });
   });
 

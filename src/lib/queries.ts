@@ -129,6 +129,15 @@ export function getMandateById(
     .get(id) as unknown as MandateRow | undefined;
 }
 
+/** Resolve the merchant for a mandate when an event only includes its id. */
+export function getMandateMerchant(db: DatabaseSync, id: number): string | undefined {
+  return (
+    db.prepare("SELECT merchant FROM mandates WHERE id = ?").get(id) as
+      | { merchant: string }
+      | undefined
+  )?.merchant;
+}
+
 /** List charge events for a mandate ordered by ledger descending. */
 export function listMandateCharges(
   db: DatabaseSync,

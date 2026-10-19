@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { EventEmitter } from "node:events";
 import type { DatabaseSync } from "node:sqlite";
 import type { TokenMetadataService } from "../lib/tokens.ts";
 import { mandatesRouter } from "./mandates.ts";
@@ -12,6 +13,7 @@ import { protocolRouter } from "./protocol.ts";
 import { statsRouter } from "./stats.ts";
 import { subscribersRouter } from "./subscribers.ts";
 import { tokensRouter } from "./tokens.ts";
+import { streamRouter } from "./stream.ts";
 import { vaultRouter } from "./vault.ts";
 
 export { defaultMerchantSummaryCache, MerchantSummaryCache };
@@ -23,6 +25,7 @@ export interface NetworkRoutes {
   defaultToken?: string | undefined;
   /** Resolves this network's token contract ids to symbol/name/decimals. */
   tokens: TokenMetadataService;
+  events?: EventEmitter | undefined;
 }
 
 /**
@@ -40,7 +43,13 @@ export function buildApiRouter(networks: NetworkRoutes[]): Router {
   for (const network of networks) {
     router.use(
       `/${network.name}`,
-      buildRoutes(network.db, network.tokens, network.summaryCache, network.defaultToken),
+      buildRoutes(
+        network.db,
+        network.tokens,
+        network.summaryCache,
+        network.defaultToken,
+        network.events,
+      ),
     );
   }
   router.use(
@@ -49,6 +58,7 @@ export function buildApiRouter(networks: NetworkRoutes[]): Router {
       defaultNetwork.tokens,
       defaultNetwork.summaryCache,
       defaultNetwork.defaultToken,
+      defaultNetwork.events,
     ),
   );
   return router;
@@ -74,8 +84,13 @@ export function buildRoutes(
   tokens: TokenMetadataService,
   summaryCache: MerchantSummaryCache = defaultMerchantSummaryCache,
   defaultToken?: string,
+  events?: EventEmitter,
 ): Router {
   const r = Router();
+  r.use((_req, res, next) => {
+    res.setHeader("Cache-Control", "public, max-age=5");
+    next();
+  });
   r.use(plansRouter(db, tokens));
   r.use(protocolRouter(db));
   r.use(mandatesRouter(db, tokens));
@@ -83,6 +98,7 @@ export function buildRoutes(
   r.use(subscribersRouter(db));
   r.use(statsRouter(db));
   r.use(tokensRouter(tokens));
+  if (events) r.use(streamRouter(events, db));
   r.use(vaultRouter(db));
   return r;
 }
