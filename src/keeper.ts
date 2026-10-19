@@ -9,6 +9,7 @@ import {
 } from "@stellar/stellar-sdk";
 import type { Config } from "./config.ts";
 import { logger } from "./lib/logger.ts";
+import type { KeeperPassSummary } from "./routes/types.ts";
 
 export interface DueMandate {
   id: number;
@@ -90,6 +91,7 @@ export class Keeper {
    * the old key can be retired. Never holds a secret.
    */
   private pendingRetirement: string | null = null;
+  private readonly passes: KeeperPassSummary[] = [];
 
   constructor(db: DatabaseSync, server: KeeperRpc, config: Config) {
     this.db = db;
@@ -213,7 +215,45 @@ export class Keeper {
       results.push(result);
     }
     this.announceRetirement(results);
+    this.recordPass(now, results);
     return results;
+  }
+
+  /** Most recent pass first; errors are already scrubbed of keys and secrets. */
+  passHistory(): KeeperPassSummary[] {
+    return [...this.passes].reverse().map((pass) => ({
+      ...pass,
+      failures: pass.failures.map((failure) => ({ ...failure })),
+      backoff: pass.backoff.map((item) => ({ ...item })),
+    }));
+  }
+
+  private recordPass(now: number, results: SettleResult[]): void {
+    this.passes.push({
+      time: now,
+      attempted: results.length,
+      settled: results.filter((result) => result.status === "settled").length,
+      failures: results
+        .filter((result) => result.status === "failed")
+        .map((result) => ({
+          mandateId: result.mandateId,
+          error: this.scrubError(result.error ?? "Settlement failed"),
+        })),
+      backoff: this.backoffList(now),
+    });
+    if (this.passes.length > 20) this.passes.shift();
+  }
+
+  private scrubError(message: string): string {
+    const sensitive = [
+      this.config.KEEPER_SECRET,
+      this.config.KEEPER_SECRET_NEXT,
+      ...this.keys.map((key) => key.publicKey()),
+    ];
+    return sensitive.reduce<string>(
+      (safe, value) => (value ? safe.replaceAll(value, "[redacted]") : safe),
+      message,
+    );
   }
 
   /**
@@ -275,7 +315,7 @@ export class Keeper {
       try {
         return await this.submit(mandateId);
       } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
+        const error = this.scrubError(err instanceof Error ? err.message : String(err));
         if (isKeyFailure(err) && this.active + 1 < this.keys.length) {
           const failed = this.keys[this.active]!.publicKey();
           this.pendingRetirement ??= this.keys[0]!.publicKey();
@@ -315,7 +355,7 @@ export class Keeper {
       return {
         mandateId,
         status: "failed",
-        error: JSON.stringify(sent.errorResult ?? sent.status),
+        error: this.scrubError(JSON.stringify(sent.errorResult ?? sent.status)),
       };
     }
 
