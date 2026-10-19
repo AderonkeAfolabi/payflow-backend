@@ -1691,6 +1691,23 @@ describe("merchant revenue", () => {
     assert.equal(body.to, MAR_NEXT + 86_400);
   });
 
+  test("the epoch is a valid bound and a negative one is not", async () => {
+    const fromEpoch = await revGet(
+      `/api/merchants/${REV_MERCHANT}/revenue?bucket=day&from=0&to=${MAR_NEXT + 86_400}`,
+    );
+    assert.equal(fromEpoch.status, 200);
+    assert.equal(fromEpoch.body.from, 0);
+
+    const negative = await revGet(
+      `/api/merchants/${REV_MERCHANT}/revenue?bucket=day&from=-1`,
+    );
+    assert.equal(negative.status, 400);
+    assert.equal(
+      (negative.body as unknown as { error: { code: string } }).error.code,
+      "invalid_request",
+    );
+  });
+
   test("replaying the same charges leaves the report unchanged", async () => {
     const before = await revGet(`/api/merchants/${REV_MERCHANT}/revenue?bucket=day`);
     // The same ledger, applied again as a crashed pass would.

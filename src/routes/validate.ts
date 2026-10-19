@@ -69,8 +69,15 @@ export const limitSchema = positiveInteger;
 /** A number of days, as the forecast and upcoming windows take it. */
 export const daysSchema = positiveInteger;
 
-/** A unix timestamp in seconds, as the revenue range takes it. */
-export const unixSecondsSchema = positiveInteger;
+/**
+ * A unix timestamp in seconds, as the revenue range takes it. Zero is the
+ * epoch and a legitimate bound, so this one is not required to be positive.
+ */
+export const unixSecondsSchema = z
+  .string()
+  .regex(/^\d+$/, "must be a unix timestamp in seconds")
+  .transform(Number)
+  .refine((value) => Number.isSafeInteger(value), "must be a unix timestamp in seconds");
 
 /** A calendar bucket size: the periods the churn and revenue reports use. */
 export const bucketSchema = z.enum(["day", "week", "month"]);
