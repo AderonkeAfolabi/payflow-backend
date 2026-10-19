@@ -7,6 +7,19 @@ All notable changes to payflow-backend. The format follows
 ## [Unreleased]
 
 ### Added
+- **Parallel settlement with keeper channel accounts (#36).** Extra signing
+  accounts listed in `KEEPER_CHANNEL_SECRETS` become parallel settlement
+  channels: due mandates are pulled from one shared queue by one worker per
+  channel, so every account sequences its own transactions (paying its own
+  fees) while channels settle concurrently — a single key manages only a few
+  charges per minute and large merchants were billed hours late. A channel
+  whose account cannot pay is skipped for the pass (logged by public key) and
+  its share settles through the live channels instead of backing off against
+  a dead key; with one channel the pass is the old sequential behaviour and
+  makes no extra RPC call. A fee-bump design was rejected because a fee bump
+  consumes the *fee source's* sequence number, which would serialize every
+  transaction against the main key again. Tested with three channels: no
+  sequence-number collisions, all channels sign, results keep due order.
 - **Per-plan statistics (#29).** `GET /api/plans/:id/stats` reports a plan's
   active and total mandates, cancellations, gross amount collected and the
   average number of settled charges per mandate, so merchants can compare
