@@ -266,6 +266,43 @@ export interface MerchantChurnResponse {
   totals: Omit<ChurnBucket, "bucket">;
 }
 
+/**
+ * The time buckets a revenue report can be grouped by. The same calendar
+ * periods the churn report uses, so a chart can put both on one axis.
+ */
+export type RevenueBucketSize = ChurnBucketSize;
+
+/** One bucket of a merchant's revenue report. */
+export interface RevenueBucket {
+  /**
+   * The bucket's label: `2025-01-15` for a day, the Monday's date
+   * (`2025-01-13`) for a week, and `2025-01` for a month. All in UTC.
+   */
+  bucket: string;
+  /** Gross collected from subscribers: the charge amount plus the fee. */
+  gross: string;
+  /** The protocol's share of that gross. */
+  fee: string;
+  /** What the merchant kept: gross minus the fee. */
+  net: string;
+  /** Charges settled in the bucket. */
+  charges: number;
+}
+
+export interface MerchantRevenueResponse {
+  merchant: string;
+  /** The bucket size the report is grouped by. */
+  bucket: RevenueBucketSize;
+  /** Start of the requested range in unix seconds; null when unbounded. */
+  from: number | null;
+  /** End of the requested range in unix seconds (exclusive); null when unbounded. */
+  to: number | null;
+  /** The buckets, oldest first. */
+  buckets: RevenueBucket[];
+  /** The same figures summed over every bucket in the report. */
+  totals: Omit<RevenueBucket, "bucket">;
+}
+
 export interface UpcomingCharge {
   mandateId: number;
   merchant: string;

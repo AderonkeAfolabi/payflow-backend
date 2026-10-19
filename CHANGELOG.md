@@ -7,6 +7,26 @@ All notable changes to payflow-backend. The format follows
 ## [Unreleased]
 
 ### Added
+- **Merchant revenue over time (#12).** `GET /api/merchants/:address/revenue`
+  reports what a merchant took in, what the protocol took and what was left,
+  in `day`, `week` or `month` buckets: `gross`, `fee` and `net` per bucket,
+  all decimal strings in the token's smallest unit. The buckets come from the
+  close time of the ledger each charge was emitted in, so the report is the
+  chain's own history and replaying a ledger range leaves it unchanged. The
+  typed client gained `merchantRevenue`.
+- **Request validation (#14).** Query and path parameters are validated with
+  zod instead of being cast: an address must be a real Stellar StrKey (an
+  account `G...` or a contract `C...`, checksum included), a `status` must be
+  one the projection writes, an id must be a positive integer and a `limit`,
+  `days` or `bucket` must be a value the API knows. A bad one is answered
+  with `400 invalid_request` and an `error.details` list naming it, so a
+  client bug looks like an error instead of an empty page. Valid requests are
+  unaffected.
+- **Local development with Docker (#11).** `docker-compose.yml` runs the
+  service from the same `Dockerfile` the deployment uses, reads `.env` and
+  keeps the projection on a named volume, so `docker compose up` is enough to
+  run the backend. CI builds the image (and pushes nothing), so a Dockerfile
+  that no longer builds is caught before it reaches a deployment.
 - **Parallel settlement with keeper channel accounts (#36).** Extra signing
   accounts listed in `KEEPER_CHANNEL_SECRETS` become parallel settlement
   channels: due mandates are pulled from one shared queue by one worker per
@@ -109,6 +129,24 @@ All notable changes to payflow-backend. The format follows
 
 ### Changed
 
+- **A charge is stamped with the chain's clock (#13).** `charges.created_at`
+  was the moment the indexer happened to see the charge, so every charge
+  indexed in one backfill shared one timestamp and any time-based view of the
+  history was wrong after a redeploy. It is now the close time of the ledger
+  the charge was emitted in, in unix milliseconds. The row is still written
+  with `INSERT OR IGNORE`, so replaying a ledger range leaves the stored value
+  untouched — which also means a row written before this change keeps the
+  timestamp it was given. A charge whose event carried no close time falls
+  back to the indexer's wall clock, and says so in the log.
+- **Parameters the API does not accept are refused (#14).** `?status=whatever`,
+  `/api/plans/abc`, a mistyped address and a malformed `limit` used to be
+  cast and quietly matched nothing, so a client bug looked like an empty
+  page. They are now `400 invalid_request`, with `error.details` naming the
+  parameter and what was expected. Valid requests are unaffected, and an
+  empty value (`?merchant=`) still means "no filter".
+- **An empty `OTEL_EXPORTER_OTLP_ENDPOINT` means tracing is off.** The shipped
+  `.env.example` leaves the variable blank, and a container that reads that
+  file used to refuse to start over a URL that is not there.
 - **Summary query indexes (#66).** Covering indexes for the merchant and
   subscriber summary aggregates (`mandates(merchant, status, period, amount)`,
   `charges(merchant, amount)`, `charges(subscriber, amount, fee)`) are added

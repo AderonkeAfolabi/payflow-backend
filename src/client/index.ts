@@ -22,6 +22,7 @@ import type {
   MandatePage,
   MandateRow,
   MerchantChurnResponse,
+  MerchantRevenueResponse,
   MerchantSubscribersResponse,
   MerchantSummary,
   PlanPage,
@@ -52,6 +53,7 @@ export type {
   MandatePage,
   MandateRow,
   MerchantChurnResponse,
+  MerchantRevenueResponse,
   MerchantSubscriber,
   MerchantSubscribersResponse,
   MerchantSummary,
@@ -60,6 +62,8 @@ export type {
   PlanStatsResponse,
   ProtocolFeeChange,
   ProtocolResponse,
+  RevenueBucket,
+  RevenueBucketSize,
   StatsResponse,
   SubscriberSummary,
   TokenFields,
@@ -201,6 +205,22 @@ export class PayflowClient {
   ): Promise<MerchantChurnResponse> {
     return this.get<MerchantChurnResponse>(
       `/api/merchants/${encodeURIComponent(address)}/churn`,
+      query,
+    );
+  }
+
+  /**
+   * The merchant's revenue over time: gross, fee and net per time bucket.
+   *
+   * `from` and `to` bound the range in unix seconds; without them the
+   * report covers the merchant's whole history.
+   */
+  merchantRevenue(
+    address: string,
+    query: { bucket?: ChurnBucketSize; from?: number; to?: number; limit?: number } = {},
+  ): Promise<MerchantRevenueResponse> {
+    return this.get<MerchantRevenueResponse>(
+      `/api/merchants/${encodeURIComponent(address)}/revenue`,
       query,
     );
   }

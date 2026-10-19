@@ -4,6 +4,7 @@ import { getPlanById, getPlanStats, listPlans } from "../lib/queries.ts";
 import type { TokenMetadataService } from "../lib/tokens.ts";
 import { limitOf, tokenFields } from "./helpers.ts";
 import { sendApiError } from "./errors.ts";
+import { addressSchema, idSchema, limitSchema, present, validate } from "./validate.ts";
 import type { PlanPage, PlanStatsResponse } from "./types.ts";
 
 /**
@@ -18,11 +19,21 @@ export function plansRouter(db: DatabaseSync, tokens: TokenMetadataService): Rou
   const r = Router();
 
   r.get("/plans", async (req, res) => {
-    const { merchant } = req.query;
+    const merchant = validate(
+      req,
+      res,
+      "merchant",
+      addressSchema.optional(),
+      present(req.query.merchant),
+    );
+    if (!merchant.ok) return;
+    const limit = validate(req, res, "limit", limitSchema.optional(), present(req.query.limit));
+    if (!limit.ok) return;
+
     const plans = await Promise.all(
       listPlans(db, {
-        merchant: merchant ? String(merchant) : undefined,
-        limit: limitOf(req.query.limit),
+        merchant: merchant.value,
+        limit: limitOf(limit.value),
       }).map(async (row) => ({ ...row, ...(await tokenFields(tokens, row.token)) })),
     );
     const body: PlanPage = { plans };
@@ -30,23 +41,25 @@ export function plansRouter(db: DatabaseSync, tokens: TokenMetadataService): Rou
   });
 
   r.get("/plans/:id", async (req, res) => {
-    const row = getPlanById(db, Number(req.params.id));
+    const id = validate(req, res, "id", idSchema, req.params.id);
+    if (!id.ok) return;
+
+    const row = getPlanById(db, id.value);
     if (!row) {
       sendApiError(res, req, 404, "plan_not_found");
       return;
     }
-    res.json({ ...row, ...(await tokenFields(tokens, row.token)) });
+    const tokenId = row.token;
+    res.json({ ...row, ...(await tokenFields(tokens, tokenId)) });
   });
 
   /** `GET /plans/:id/stats`: active and total mandates, cancellations, gross
    * collected, and average charges per mandate. */
   r.get("/plans/:id/stats", (req, res) => {
-    const planId = Number(req.params.id);
-    // A plan id is a positive integer; anything else cannot name a plan.
-    if (!Number.isInteger(planId) || planId <= 0) {
-      sendApiError(res, req, 404, "plan_not_found");
-      return;
-    }
+    const id = validate(req, res, "id", idSchema, req.params.id);
+    if (!id.ok) return;
+    const planId = id.value;
+
     if (!getPlanById(db, planId)) {
       sendApiError(res, req, 404, "plan_not_found");
       return;

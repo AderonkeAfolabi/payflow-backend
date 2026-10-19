@@ -15,8 +15,11 @@ import type {
   ProtocolResponse,
   MandateRow,
   MerchantChurnResponse,
+  MerchantRevenueResponse,
   MerchantSummary,
   PlanRow,
+  RevenueBucket,
+  RevenueBucketSize,
   StatsResponse,
   SubscriberSummary,
   TokenRevenue,
@@ -528,6 +531,133 @@ function bucketStarts(
     cursor = nextBucketStart(bucket, cursor);
   }
   return starts;
+}
+
+/**
+ * A merchant's revenue over time: what came in, what the protocol took and
+ * what the merchant kept, in calendar buckets.
+ *
+ * The buckets come from `charges.created_at`, which is the close time of the
+ * ledger each charge was emitted in — the chain's clock, not the indexer's —
+ * so the report describes the chain's own history and replaying a ledger
+ * range leaves it unchanged.
+ *
+ * `gross` is what the subscribers paid (the charge amount plus the fee),
+ * `fee` is the protocol's share of it and `net` is what the merchant kept,
+ * so gross − fee = net. Every sum is read as a bigint, so no amount
+ * round-trips through a JavaScript number.
+ *
+ * `from` and `to` bound the range in unix seconds; the range is half-open,
+ * so a charge exactly at `to` is excluded. Without them the report covers
+ * the merchant's whole history.
+ */
+export function getMerchantRevenue(
+  db: DatabaseSync,
+  merchant: string,
+  bucket: RevenueBucketSize,
+  from: number | undefined,
+  to: number | undefined,
+  limit: number,
+): MerchantRevenueResponse {
+  const where = ["merchant = ?"];
+  const args: unknown[] = [merchant];
+  if (from !== undefined) {
+    // `created_at` is unix milliseconds; the range is in seconds.
+    where.push("created_at >= ?");
+    args.push(from * 1000);
+  }
+  if (to !== undefined) {
+    where.push("created_at < ?");
+    args.push(to * 1000);
+  }
+
+  const stmt = db.prepare(
+    // The bucket expression is a vetted static fragment chosen by the
+    // bucket size and the predicates are fixed; the address and the range
+    // are bound parameters, so no request data reaches the SQL text.
+    // eslint-disable-next-line no-restricted-syntax
+    `SELECT ${BUCKET_SQL[bucket]} AS bucket,
+            COALESCE(SUM(CAST(amount AS INTEGER) + CAST(fee AS INTEGER)), 0) AS gross,
+            COALESCE(SUM(CAST(fee AS INTEGER)), 0) AS fee,
+            COUNT(*) AS charges
+       FROM (
+         SELECT CAST(created_at / 1000 AS INTEGER) AS at, amount, fee
+           FROM charges
+          WHERE ${where.join(" AND ")}
+       )
+      GROUP BY bucket
+      ORDER BY bucket`,
+  );
+  // Read the sums as bigint so a large collected total never round-trips
+  // through a JavaScript number at stroop scale.
+  stmt.setReadBigInts(true);
+  const rows = stmt.all(...(args as never[])) as unknown as Array<{
+    bucket: number;
+    gross: bigint;
+    fee: bigint;
+    charges: bigint;
+  }>;
+
+  const perBucket = new Map<number, { gross: bigint; fee: bigint; charges: number }>();
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const row of rows) {
+    // The statement reads integers as bigint, so the bucket start is one too:
+    // it is a timestamp, not an amount, and fits in a number.
+    const start = Number(row.bucket);
+    perBucket.set(start, {
+      gross: row.gross,
+      fee: row.fee,
+      // A count, never an amount; safe to coerce back to a number.
+      charges: Number(row.charges),
+    });
+    if (start < min) min = start;
+    if (start > max) max = start;
+  }
+
+  // Every bucket between the first and the last one with data is present, so
+  // a chart has no gaps in it. The limit keeps the most recent ones.
+  const buckets: RevenueBucket[] = [];
+  if (perBucket.size > 0) {
+    const starts = bucketStarts(bucket, min, max);
+    const window = starts.slice(Math.max(0, starts.length - limit));
+    for (const start of window) {
+      const entry = perBucket.get(Math.floor(start.getTime() / 1000));
+      const gross = entry?.gross ?? 0n;
+      const fee = entry?.fee ?? 0n;
+      buckets.push({
+        bucket: bucketLabel(bucket, start),
+        gross: String(gross),
+        fee: String(fee),
+        net: String(gross - fee),
+        charges: entry?.charges ?? 0,
+      });
+    }
+  }
+
+  const totals = buckets.reduce(
+    (acc, b) => ({
+      gross: acc.gross + BigInt(b.gross),
+      fee: acc.fee + BigInt(b.fee),
+      net: acc.net + BigInt(b.net),
+      charges: acc.charges + b.charges,
+    }),
+    { gross: 0n, fee: 0n, net: 0n, charges: 0 },
+  );
+
+  return {
+    merchant,
+    bucket,
+    from: from ?? null,
+    to: to ?? null,
+    buckets,
+    totals: {
+      gross: String(totals.gross),
+      fee: String(totals.fee),
+      net: String(totals.net),
+      charges: totals.charges,
+    },
+  };
 }
 
 /** A merchant's distinct subscriber, grouped across that subscriber's mandates with the merchant. */
