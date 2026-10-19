@@ -209,6 +209,59 @@ describe("indexer projections", () => {
     assert.equal(mandate.charges_made, 1);
   });
 
+  test("a charge is stamped with the ledger close time, not the indexer's clock", () => {
+    // 2025-01-15T12:00:00Z: the chain's clock, long before this test runs.
+    const at = Math.floor(Date.UTC(2025, 0, 15, 12) / 1000);
+    ix.apply(subscribed);
+    ix.apply({ ...charged(1, 1_700_060_000, "tx-close"), closeTime: at });
+
+    const row = d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-close") as {
+      created_at: number;
+    };
+    assert.equal(row.created_at, at * 1000);
+    assert.notEqual(
+      row.created_at,
+      Date.now(),
+      "a backfill must not stamp a charge with the moment it was indexed",
+    );
+  });
+
+  test("replaying a charge leaves its timestamp unchanged", () => {
+    const at = Math.floor(Date.UTC(2025, 0, 15, 12) / 1000);
+    ix.apply(subscribed);
+    ix.apply({ ...charged(1, 1_700_060_000, "tx-replay"), closeTime: at });
+    const first = (
+      d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-replay") as {
+        created_at: number;
+      }
+    ).created_at;
+
+    // The same ledger, applied again as a crashed pass would.
+    ix.apply({ ...charged(1, 1_700_060_000, "tx-replay"), closeTime: at });
+    const second = (
+      d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-replay") as {
+        created_at: number;
+      }
+    ).created_at;
+
+    assert.equal(second, first);
+    assert.equal(second, at * 1000);
+  });
+
+  test("a charge with no close time falls back to the indexer's clock", () => {
+    // The RPC did not report a close time, so there is no chain clock to use.
+    // The fallback is the indexer's wall clock, which is logged: it is the one
+    // value a re-index cannot reproduce.
+    const before = Date.now();
+    ix.apply(subscribed);
+    ix.apply(charged(1, 1_700_060_000, "tx-no-close"));
+
+    const row = d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-no-close") as {
+      created_at: number;
+    };
+    assert.ok(row.created_at >= before && row.created_at <= Date.now());
+  });
+
   test("out-of-order charges never move a mandate backwards", () => {
     ix.apply(subscribed);
     ix.apply(charged(2, 1_700_120_000, "tx-b"));

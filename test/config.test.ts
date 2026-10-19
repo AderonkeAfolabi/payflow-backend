@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test, describe } from "node:test";
+import { readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { loadConfig, networkConfigs } from "../src/config.ts";
 
@@ -209,6 +211,45 @@ describe("network configs", () => {
       () => networkConfigs(config, env(overrides)),
       /Invalid network name "main net"/,
     );
+  });
+});
+
+describe("optional variables left blank", () => {
+  test("an empty OTLP endpoint means tracing is off, not a bad URL", () => {
+    // The shipped .env.example leaves the variable blank, and a container
+    // that reads that file must still start.
+    assert.equal(
+      loadConfig(env({ OTEL_EXPORTER_OTLP_ENDPOINT: "" })).OTEL_EXPORTER_OTLP_ENDPOINT,
+      undefined,
+    );
+    assert.equal(loadConfig(env()).OTEL_EXPORTER_OTLP_ENDPOINT, undefined);
+  });
+
+  test("a real endpoint is kept and a malformed one is rejected", () => {
+    assert.equal(
+      loadConfig(env({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318" }))
+        .OTEL_EXPORTER_OTLP_ENDPOINT,
+      "http://localhost:4318",
+    );
+    assert.throws(
+      () => loadConfig(env({ OTEL_EXPORTER_OTLP_ENDPOINT: "not-a-url" })),
+      /OTEL_EXPORTER_OTLP_ENDPOINT/,
+    );
+  });
+});
+
+describe("the shipped .env.example", () => {
+  test("is a configuration the service can start with", () => {
+    // The file a new contributor copies is the one a container reads, so a
+    // blank value in it must not stop the process from starting.
+    const contents = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+    const config = loadConfig(parseEnv(contents));
+    assert.equal(
+      config.PLAN_REGISTRY_ID,
+      "CDQ5EJTVXXX2CBMHWP3BGGUDHSK6D4I25IF5XXH3QGL2TNTBMJUOFKDB",
+    );
+    assert.equal(config.KEEPER_ENABLED, false);
+    assert.equal(config.OTEL_EXPORTER_OTLP_ENDPOINT, undefined);
   });
 });
 

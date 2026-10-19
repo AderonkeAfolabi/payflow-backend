@@ -7,9 +7,12 @@ import { Indexer } from "../src/indexer.ts";
 import { PayflowClient, PayflowApiError } from "../src/client/index.ts";
 import type { Config } from "../src/config.ts";
 import type { DecodedEvent } from "../src/lib/stellar.ts";
+import { testAddress } from "./addresses.ts";
 
 const MERCHANT = "GB343X4K4TIYARSAAQZ55RIZY2YLFNOQCM3LNQSRBV56TMVGIF55WCOH";
 const SUBSCRIBER = "GAIJKXL3Q45ZR32QRDVPUDD4DPLT5GYCHJFESQPHHWJRYX4YZCG25JJR";
+/** A well-formed address the projection knows nothing about. */
+const UNKNOWN_MERCHANT = testAddress(30);
 
 const config = {
   STELLAR_NETWORK: "testnet",
@@ -87,7 +90,7 @@ describe("typed api client", () => {
 
     const mine = await client.plans({ merchant: MERCHANT, limit: 10 });
     assert.equal(mine.plans.length, 1);
-    const none = await client.plans({ merchant: "GNOBODY" });
+    const none = await client.plans({ merchant: UNKNOWN_MERCHANT });
     assert.equal(none.plans.length, 0);
   });
 
@@ -119,6 +122,19 @@ describe("typed api client", () => {
     assert.equal(churn.buckets[0]?.started, 1);
     assert.equal(churn.totals.started, 1);
     assert.equal(churn.totals.net, 1);
+  });
+
+  test("fetches the merchant revenue report", async () => {
+    const revenue = await client.merchantRevenue(MERCHANT, { bucket: "day" });
+    assert.equal(revenue.merchant, MERCHANT);
+    assert.equal(revenue.bucket, "day");
+    assert.equal(revenue.buckets.length, 1);
+    // Amounts stay strings end to end; the client never turns money into a float.
+    assert.equal(revenue.buckets[0]?.gross, "10000000");
+    assert.equal(revenue.buckets[0]?.fee, "100000");
+    assert.equal(revenue.buckets[0]?.net, "9900000");
+    assert.equal(revenue.totals.gross, "10000000");
+    assert.equal(revenue.totals.charges, 1);
   });
 
   test("mandate list, charges and due pages", async () => {
@@ -160,7 +176,7 @@ describe("typed api client", () => {
       },
     ]);
 
-    const none = await client.merchantSubscribers("GNOBODY");
+    const none = await client.merchantSubscribers(UNKNOWN_MERCHANT);
     assert.deepEqual(none.subscribers, []);
 
     const stats = await client.stats();

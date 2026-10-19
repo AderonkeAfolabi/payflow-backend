@@ -124,7 +124,13 @@ const schema = z.object({
   DATABASE_PATH: z.string().default("./payflow.db"),
   CORS_ORIGIN: z.string().default("*"),
   LOG_LEVEL: z.string().default("info"),
-  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+  // An empty value means "not set": the shipped .env.example leaves the
+  // variable blank, and a container that reads it must not refuse to start
+  // over a URL that is not there.
+  OTEL_EXPORTER_OTLP_ENDPOINT: z
+    .union([z.literal(""), z.string().url()])
+    .optional()
+    .transform((value) => (value === "" ? undefined : value)),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 
   ADMIN_TOKEN: z.string().optional(),

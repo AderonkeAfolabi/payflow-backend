@@ -8,7 +8,10 @@ import { DatabaseSync } from "node:sqlite";
  * ledger range twice must not change the result.
  *
  * `charges` is an append-only log keyed on (tx_hash, mandate_id) so a replayed
- * ledger cannot double-count revenue.
+ * ledger cannot double-count revenue. `created_at` is the charge's own time:
+ * the close time of the ledger it was emitted in, in unix milliseconds. It is
+ * the chain's clock, not the indexer's, so a report bucketed by it is the
+ * same whether the charge was indexed live or on a backfill.
  *
  * `mandate_events` is the churn log: one row per mandate per lifecycle event
  * (started, cancelled, ended, completed), stamped with the ledger close time
@@ -65,6 +68,9 @@ CREATE TABLE IF NOT EXISTS charges (
   charges_made INTEGER NOT NULL,
   next_charge  INTEGER NOT NULL,
   ledger       INTEGER NOT NULL,
+  -- When the charge happened: the close time of its ledger, in unix
+  -- milliseconds. The chain's clock, so a backfill stores the same value a
+  -- live index would have.
   created_at   INTEGER NOT NULL,
   PRIMARY KEY (tx_hash, mandate_id)
 );
@@ -141,6 +147,10 @@ const ADDED_INDEXES: ReadonlyArray<[table: string, name: string, columns: string
   ["mandates", "mandates_merchant_status_period_amount", "merchant, status, period, amount"],
   ["charges", "charges_merchant_amount", "merchant, amount"],
   ["charges", "charges_subscriber_amount_fee", "subscriber, amount, fee"],
+  // The merchant revenue report reads one merchant's charges in a time range
+  // and buckets them by their close time, so the range filter is served from
+  // the index rather than from a scan of the merchant's whole history.
+  ["charges", "charges_merchant_created_at", "merchant, created_at"],
 ];
 
 export function migrate(db: DatabaseSync): void {

@@ -469,6 +469,32 @@ export class Indexer {
       );
   }
 
+  /**
+   * When the charge happened, in unix milliseconds.
+   *
+   * The ledger's close time is the chain's own clock, so the same charge
+   * carries the same timestamp however often it is indexed: a backfill or a
+   * restart after a deploy no longer collapses the whole history onto one
+   * moment, and a report bucketed by it describes the chain rather than the
+   * indexer. The row is written with `INSERT OR IGNORE`, so a replay leaves
+   * the stored value untouched.
+   *
+   * An event that carried no close time has no chain clock to use; the
+   * indexer's wall clock is the fallback, and it is logged because it is the
+   * one value that is not reproducible.
+   */
+  private chargedAt(e: DecodedEvent): number {
+    const closeTime = e.closeTime;
+    if (closeTime === undefined || closeTime === null) {
+      logger.warn(
+        { txHash: e.txHash, ledger: e.ledger },
+        "charge has no ledger close time; stamped with the indexer's clock instead",
+      );
+      return Date.now();
+    }
+    return closeTime * 1000;
+  }
+
   private onCharged(e: DecodedEvent): void {
     const [mandateId, subscriber, merchant] = e.topics;
     const id = num(mandateId);
@@ -491,7 +517,7 @@ export class Indexer {
         num(e.data.charges_made),
         num(e.data.next_charge),
         e.ledger,
-        Date.now(),
+        this.chargedAt(e),
       );
 
     // The Charged event carries next_charge but not last_charge. The contract
