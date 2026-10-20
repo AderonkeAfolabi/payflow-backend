@@ -7,6 +7,13 @@ All notable changes to payflow-backend. The format follows
 ## [Unreleased]
 
 ### Added
+- **A coverage report with a minimum threshold (#49).** `npm run test:coverage`
+  runs the tests with Node's own coverage and writes an lcov report to
+  `coverage/lcov.info`, which CI uploads as an artifact. The `coverage` job
+  fails when the line coverage of `src/` falls below the threshold
+  `--test-coverage-lines` sets: 94%, the measured baseline of 96.63% minus
+  two percentage points. No coverage tool is added as a dependency — the test
+  runner already knows how to measure itself.
 - **An operator CLI (#41).** `npm run cli -- <command>` answers the questions an
   incident asks — is the projection current, what does mandate 42 look like,
   what is due, settle this mandate, rebuild the projection — without an ad-hoc
@@ -200,6 +207,17 @@ All notable changes to payflow-backend. The format follows
   that replaying the fixture twice leaves the database unchanged.
 
 ### Changed
+
+- **The indexer's idempotency is tested under random orderings (#48).** The
+  projection was checked against a handful of hand-written replays. A seeded
+  generator now builds a random history across several mandates, plans and
+  vault rows, applies it in ledger order, and applies the same history again
+  as a shuffled, repeated replay; the two projections have to be identical.
+  The seed is part of the test, so a failure is reproducible. The two orderings
+  the projection does not survive — an update that arrives before the row it
+  updates, and a pause that arrives after the unpause that followed it — are
+  pinned down by their own tests, so what the property relies on is written
+  down rather than assumed.
 
 - **The test files are type-checked (#50).** `tsconfig.json` only covered
   `src/`, so a type error in a test was never reported: it surfaced as a
