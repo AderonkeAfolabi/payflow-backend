@@ -170,6 +170,11 @@ All notable changes to payflow-backend. The format follows
   backoff for at most five attempts before the webhook is marked failed. The
   indexer's `events` feed drives delivery, and a short-cadence retry pass
   makes progress between indexer passes.
+- **Replay test against recorded testnet events (#6).** `test/fixtures/replay-events.json`
+  records five real `getEvents` responses from the deployed contracts, and
+  `test/replay.test.ts` replays them through `decodeEvent` and the projection,
+  asserts the resulting database state matches a committed snapshot, and proves
+  that replaying the fixture twice leaves the database unchanged.
 
 ### Changed
 
