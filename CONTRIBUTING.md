@@ -38,10 +38,9 @@ API it exercises has changed shape.
 ## Coverage
 
 `npm run test:coverage` runs the tests with Node's own coverage
-(`--experimental-test-coverage`) and writes an lcov report to
-`coverage/lcov.info`, which the `coverage` job uploads as an artifact. No
-coverage tool is added as a dependency: the test runner already knows how
-to measure itself.
+(`--experimental-test-coverage`) and writes an lcov report to `lcov.info`,
+which the `coverage` job uploads as an artifact. No coverage tool is added
+as a dependency: the test runner already knows how to measure itself.
 
 The job fails when the line coverage of `src/` falls below the threshold
 `--test-coverage-lines` sets. The threshold is **94%**, which is the

@@ -9,7 +9,7 @@ All notable changes to payflow-backend. The format follows
 ### Added
 - **A coverage report with a minimum threshold (#49).** `npm run test:coverage`
   runs the tests with Node's own coverage and writes an lcov report to
-  `coverage/lcov.info`, which CI uploads as an artifact. The `coverage` job
+  `lcov.info`, which CI uploads as an artifact. The `coverage` job
   fails when the line coverage of `src/` falls below the threshold
   `--test-coverage-lines` sets: 94%, the measured baseline of 96.63% minus
   two percentage points. No coverage tool is added as a dependency — the test
