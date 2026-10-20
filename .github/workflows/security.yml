@@ -40,5 +40,6 @@ jobs:
     # script is taken from the same commit.
     uses: MMM-pay/.github/.github/workflows/malware-scan.yml@2d7d68fd8e246075e4ac4c1689aeab66d7554702 # main
     with:
-      pr: ${{ github.event.pull_request.number || inputs.pr }}
+      # workflow_dispatch passes the number as text; the shared workflow takes a number.
+      pr: ${{ fromJSON(format('{0}', github.event.pull_request.number || inputs.pr)) }}
       scanner_ref: 2d7d68fd8e246075e4ac4c1689aeab66d7554702
