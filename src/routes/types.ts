@@ -359,6 +359,17 @@ export interface UpcomingChargesResponse {
   assumptions: string[];
 }
 
+/** A registered webhook destination for charge events, returned to the
+ *  merchant at registration (including the HMAC signing secret). */
+export interface WebhookRegistration {
+  id: number;
+  merchant: string;
+  url: string;
+  /** HMAC-SHA256 key used to sign delivery requests. */
+  secret: string;
+  active: boolean;
+}
+
 export interface StatsResponse {
   plans: number;
   mandates: number;

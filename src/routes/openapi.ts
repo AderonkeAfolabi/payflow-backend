@@ -395,6 +395,35 @@ function apiPaths(root: string): Record<string, PathItemObject> {
         },
       },
     },
+    [p("/webhooks")]: {
+      post: {
+        tags: ["webhooks"],
+        summary: "Register a webhook for charge events",
+        description:
+          "Registers a URL to receive signed POSTs when one of the merchant's mandates charges. The caller proves control of the merchant's Stellar address with an ed25519 signature over `payflow-webhook:v1:<merchant>:<url>:<timestamp>`; the returned secret is used to verify the `Payflow-Signature` header on deliveries.",
+        operationId: `registerWebhook${operationSuffix(root)}`,
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/WebhookRegistrationRequest" },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The webhook registration, including its HMAC signing secret.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Webhook" },
+              },
+            },
+          },
+          "400": invalidRequest(),
+          "429": errorResponse('The per-IP rate limit was reached (error.code = "rate_limited").'),
+        },
+      },
+    },
     [p("/due")]: {
       get: {
         tags: ["keeper"],
@@ -1264,6 +1293,43 @@ function componentSchemas(): Record<string, SchemaObject> {
         at: { type: "integer", description: "When the charge falls due, in unix seconds." },
       },
       required: ["mandateId", "merchant", "amount", "at"],
+    },
+    WebhookRegistrationRequest: {
+      type: "object",
+      properties: {
+        merchant: { type: "string", description: ADDRESS_DESCRIPTION },
+        url: { type: "string", format: "uri", description: "The URL charge events are POSTed to." },
+        secret: {
+          type: "string",
+          description:
+            "HMAC key used to sign deliveries. When absent the service generates one and returns it once.",
+        },
+        signature: {
+          type: "string",
+          description:
+            "Base64-encoded ed25519 signature of `payflow-webhook:v1:<merchant>:<url>:<timestamp>`, proving control of the merchant address.",
+        },
+        timestamp: {
+          type: "integer",
+          description:
+            "Unix seconds. Signatures older than ten minutes are refused, so a captured request cannot be replayed indefinitely.",
+        },
+      },
+      required: ["merchant", "url", "signature", "timestamp"],
+    },
+    Webhook: {
+      type: "object",
+      properties: {
+        id: { type: "integer" },
+        merchant: { type: "string", description: ADDRESS_DESCRIPTION },
+        url: { type: "string", format: "uri" },
+        secret: {
+          type: "string",
+          description: "HMAC key used to sign delivery requests; treat it as a secret.",
+        },
+        active: { type: "boolean", description: "Whether deliveries are currently enabled." },
+      },
+      required: ["id", "merchant", "url", "secret", "active"],
     },
     UpcomingCharges: {
       type: "object",
