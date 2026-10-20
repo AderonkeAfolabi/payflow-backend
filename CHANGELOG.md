@@ -7,6 +7,20 @@ All notable changes to payflow-backend. The format follows
 ## [Unreleased]
 
 ### Added
+- **An operator CLI (#41).** `npm run cli -- <command>` answers the questions an
+  incident asks — is the projection current, what does mandate 42 look like,
+  what is due, settle this mandate, rebuild the projection — without an ad-hoc
+  script or a hand-written SQL query. `status`, `mandate` and `due` read the
+  projection only and need no network; `charge` and `reindex` use the keeper and
+  the indexer themselves, so the CLI cannot drift from what the service does.
+  Every command has its own `--help`. The two commands that change something
+  refuse to run until `--yes` says so, amounts are printed as the decimal
+  strings the projection stores, and no secret is ever printed. `status --api`
+  adds the running instance's verdict and the live indexer's health — whether
+  it is paused, what it last failed on, how many events it rejected — which the
+  projection file on its own does not hold. `reindex --from` refuses to move
+  the cursor *forwards*, because the ledgers in between would never be applied;
+  `--skip-ahead` is how an operator accepts that gap on purpose.
 - **Keeper dry-run mode (#38).** `KEEPER_DRY_RUN=true` makes a settlement pass
   rehearse instead of settle: every due charge is built and simulated against
   the RPC exactly as a real pass would — account lookup, inclusion fee,
@@ -187,6 +201,11 @@ All notable changes to payflow-backend. The format follows
 
 ### Changed
 
+- **The test files are type-checked (#50).** `tsconfig.json` only covered
+  `src/`, so a type error in a test was never reported: it surfaced as a
+  confusing runtime failure, or not at all. A `tsconfig.test.json` now covers
+  `test/` as well, the CI typecheck job runs it, and `npm run typecheck` runs
+  both. The types that were wrong are fixed, not worked around.
 - **A mandate that does not exist has no charges (#10).**
   `GET /api/mandates/:id/charges` used to answer `200` with an empty list for
   an unknown id, so "no such mandate" and "no charges yet" looked the same. It
