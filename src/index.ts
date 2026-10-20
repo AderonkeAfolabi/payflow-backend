@@ -1,6 +1,6 @@
 import { loadConfig, networkConfigs } from "./config.ts";
 import { openDatabase } from "./lib/db.ts";
-import { makeRpc } from "./lib/stellar.ts";
+import { HttpArchive, makeRpc } from "./lib/stellar.ts";
 import { makeSimulationReader, TokenMetadataService } from "./lib/tokens.ts";
 import { createApp } from "./app.ts";
 import { Indexer } from "./indexer.ts";
@@ -20,7 +20,11 @@ const networks = networkConfigs(config);
 const runtimes = networks.map((network) => {
   const db = openDatabase(network.databasePath);
   const server = makeRpc(network);
-  const indexer = new Indexer(db, server, network);
+  // A full-history archive backfills the gap between the stored cursor and
+  // the oldest ledger the RPC still serves, so an outage longer than RPC
+  // retention does not silently shrink the projection.
+  const archive = network.archiveUrl ? new HttpArchive(network.archiveUrl) : undefined;
+  const indexer = new Indexer(db, server, network, undefined, archive);
   const runPass = serial(async () => {
     try {
       const r = await withSpan(`indexer.pass.${network.name}`, () => indexer.tick());
