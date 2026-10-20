@@ -159,6 +159,16 @@ const merchantParameter = (): ParameterObject => ({
   schema: { type: "string", description: ADDRESS_DESCRIPTION },
 });
 
+/** An opaque cursor from a previous page's `nextCursor`; fetch the page after it. */
+const cursorParameter = (): ParameterObject => ({
+  name: "cursor",
+  in: "query",
+  required: false,
+  description:
+    "Opaque cursor returned by a previous page. Page by primary key, not by offset; null on the final page.",
+  schema: { type: "string" },
+});
+
 /** A query parameter holding a subscriber address. */
 const subscriberParameter = (): ParameterObject => ({
   name: "subscriber",
@@ -222,7 +232,7 @@ function apiPaths(root: string): Record<string, PathItemObject> {
         description:
           "Plans a merchant has published, newest first. Each amount is a decimal string in the plan's token's smallest unit.",
         operationId: `listPlans${operationSuffix(root)}`,
-        parameters: [merchantParameter(), limitParameter()],
+        parameters: [merchantParameter(), cursorParameter(), limitParameter()],
         responses: {
           "200": {
             description: "The plans.",
@@ -232,8 +242,13 @@ function apiPaths(root: string): Record<string, PathItemObject> {
                   type: "object",
                   properties: {
                     plans: { type: "array", items: { $ref: "#/components/schemas/Plan" } },
+                    nextCursor: {
+                      type: ["string", "null"],
+                      description:
+                        "Opaque cursor to fetch the next page; null when this is the final page.",
+                    },
                   },
-                  required: ["plans"],
+                  required: ["plans", "nextCursor"],
                 },
               },
             },
@@ -306,6 +321,7 @@ function apiPaths(root: string): Record<string, PathItemObject> {
             description: "Only mandates in this state.",
             schema: { type: "string", enum: ["Active", "Paused", "Cancelled", "Completed"] },
           },
+          cursorParameter(),
           limitParameter(),
         ],
         responses: {
@@ -317,8 +333,13 @@ function apiPaths(root: string): Record<string, PathItemObject> {
                   type: "object",
                   properties: {
                     mandates: { type: "array", items: { $ref: "#/components/schemas/Mandate" } },
+                    nextCursor: {
+                      type: ["string", "null"],
+                      description:
+                        "Opaque cursor to fetch the next page; null when this is the final page.",
+                    },
                   },
-                  required: ["mandates"],
+                  required: ["mandates", "nextCursor"],
                 },
               },
             },

@@ -113,6 +113,8 @@ export interface DueMandateRow {
 
 export interface PlanPage {
   plans: PlanRow[];
+  /** Opaque cursor to fetch the page after this one; null on the final page. */
+  nextCursor: string | null;
 }
 
 /** Per-plan statistics for comparing plans at a glance. */
@@ -134,6 +136,8 @@ export interface PlanStatsResponse {
 
 export interface MandatePage {
   mandates: MandateRow[];
+  /** Opaque cursor to fetch the page after this one; null on the final page. */
+  nextCursor: string | null;
 }
 
 export interface ChargePage {
