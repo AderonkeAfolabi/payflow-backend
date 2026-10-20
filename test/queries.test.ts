@@ -10,11 +10,13 @@ import {
   getMerchantSummary,
   getPlanById,
   getProtocolStats,
+  getPlanStats,
   getSubscriberSummary,
   listDueMandates,
   listMandateCharges,
   listMandates,
   listMerchantForecastMandates,
+  listMerchantSubscribers,
   listMerchantTokenRevenue,
   listPlans,
   listSubscriberUpcomingMandates,
@@ -341,6 +343,62 @@ describe("direct database queries", () => {
     const rows = listMerchantForecastMandates(db, MERCHANT_A);
     assert.equal(rows.length, 3);
     assert.deepEqual(listMerchantForecastMandates(db, MERCHANT_B), []);
+  });
+
+  test("getPlanStats aggregates mandates, cancellations, and collected per plan", () => {
+    // Plan 1: mandates 1 & 4 (both Active), 3 charges of 9_900_000 = 29_700_000
+    const plan1 = getPlanStats(db, 1);
+    assert.equal(plan1.planId, 1);
+    assert.equal(plan1.activeMandates, 2);
+    assert.equal(plan1.totalMandates, 2);
+    assert.equal(plan1.cancellations, 0);
+    assert.equal(plan1.totalCollected, 29_700_000n);
+    assert.equal(plan1.totalCharges, 3);
+
+    // Plan 2: mandate 2 (Active), no settled charges
+    const plan2 = getPlanStats(db, 2);
+    assert.equal(plan2.activeMandates, 1);
+    assert.equal(plan2.totalMandates, 1);
+    assert.equal(plan2.cancellations, 0);
+    assert.equal(plan2.totalCollected, 0n);
+    assert.equal(plan2.totalCharges, 0);
+
+    // Plan 3: mandate 3 (Cancelled), no settled charges
+    const plan3 = getPlanStats(db, 3);
+    assert.equal(plan3.activeMandates, 0);
+    assert.equal(plan3.totalMandates, 1);
+    assert.equal(plan3.cancellations, 1);
+    assert.equal(plan3.totalCollected, 0n);
+    assert.equal(plan3.totalCharges, 0);
+
+    // Unknown plan yields zero stats without throwing.
+    assert.equal(getPlanStats(db, 999).totalMandates, 0);
+  });
+
+  test("listMerchantSubscribers groups distinct subscribers across mandates", () => {
+    // SUB_A: mandate 1 with two charges of 9_900_000 each (19_800_000) and
+    // mandate 2 with no charges; SUB_B: mandate 4 with one charge of 9_900_000.
+    const subs = listMerchantSubscribers(db, MERCHANT_A, 50);
+    assert.deepEqual(
+      subs,
+      [
+        {
+          subscriber: SUB_A,
+          mandateCount: 2,
+          chargeCount: 2,
+          totalCollected: 19_800_000n,
+        },
+        { subscriber: SUB_B, mandateCount: 1, chargeCount: 1, totalCollected: 9_900_000n },
+      ],
+    );
+    // A subscriber with mandates but no settled charges still appears at zero:
+    // MERCHANT_B's only mandate (3, SUB_B) is cancelled with no charges.
+    const empty = listMerchantSubscribers(db, MERCHANT_B, 50);
+    assert.deepEqual(empty, [
+      { subscriber: SUB_B, mandateCount: 1, chargeCount: 0, totalCollected: 0n },
+    ]);
+    assert.deepEqual(listMerchantSubscribers(db, "GNOBODY", 50), []);
+    assert.deepEqual(listMerchantSubscribers(db, MERCHANT_A, 1), [subs[0]]);
   });
 
   test("getSubscriberSummary and listSubscriberUpcomingMandates return subscriber state", () => {

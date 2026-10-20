@@ -14,13 +14,31 @@ export type ApiErrorCode =
   | "mandate_not_found"
   | "invalid_ids"
   | "too_many_ids"
+  | "invalid_request"
+  | "invalid_token_id"
+  | "token_metadata_unavailable"
   | "unauthorized"
   | "reindex_unavailable"
   | "keeper_unavailable"
   | "indexer_unavailable"
   | "reindex_failed"
   | "keeper_pass_failed"
+  | "rate_limited"
+  | "stream_limit"
   | "internal_error";
+
+/**
+ * What is wrong with one request parameter.
+ *
+ * Only `invalid_request` carries these: the code says the request was
+ * malformed, the details say which parameter was malformed and how.
+ */
+export interface ApiErrorDetail {
+  /** The parameter the problem is about, e.g. `merchant` or `id`. */
+  path: string;
+  /** What is wrong with it. */
+  message: string;
+}
 
 /**
  * The single error envelope every API path returns:
@@ -41,6 +59,8 @@ export interface ApiErrorBody {
     code: ApiErrorCode;
     message: string;
     requestId: string | null;
+    /** Present for `invalid_request`: what was wrong with the parameters. */
+    details?: ApiErrorDetail[];
   };
 }
 
@@ -56,12 +76,17 @@ const DEFAULT_MESSAGES: Record<ApiErrorCode, string> = {
   mandate_not_found: "No mandate exists with that id.",
   invalid_ids: "The `ids` parameter must be a comma-separated list of positive integers.",
   too_many_ids: "The `ids` parameter accepts at most 100 mandate ids.",
+  invalid_request: "The request parameters are not valid.",
+  invalid_token_id: "The token id must be `native` or a contract address.",
+  token_metadata_unavailable: "The token contract's metadata could not be read; try again.",
   unauthorized: "A valid bearer token is required for this endpoint.",
   reindex_unavailable: "Reindexing is not available on this instance.",
   keeper_unavailable: "The keeper is not available on this instance.",
   indexer_unavailable: "Runtime indexer control is not available on this instance.",
   reindex_failed: "The reindex action failed.",
   keeper_pass_failed: "The keeper pass failed.",
+  rate_limited: "Too many requests. Try again later.",
+  stream_limit: "The maximum number of live streams is already connected.",
   internal_error: "An internal error occurred.",
 };
 
@@ -82,12 +107,14 @@ export function apiErrorBody(
   code: ApiErrorCode,
   requestId: string | null,
   message?: string,
+  details?: ApiErrorDetail[],
 ): ApiErrorBody {
   return {
     error: {
       code,
       message: message && message.length > 0 ? message : DEFAULT_MESSAGES[code],
       requestId,
+      ...(details && details.length > 0 ? { details } : {}),
     },
   };
 }
@@ -102,6 +129,7 @@ export function sendApiError(
   status: number,
   code: ApiErrorCode,
   message?: string,
+  details?: ApiErrorDetail[],
 ): void {
-  res.status(status).json(apiErrorBody(code, requestIdOf(req), message));
+  res.status(status).json(apiErrorBody(code, requestIdOf(req), message, details));
 }

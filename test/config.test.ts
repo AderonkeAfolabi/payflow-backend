@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { test, describe } from "node:test";
+import { readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
+import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { loadConfig, networkConfigs } from "../src/config.ts";
 
 /** The minimum viable environment: contract ids pass the 56-char check. */
+const VALID_CONTRACT_ID = StrKey.encodeContract(Buffer.alloc(32));
 const BASE = {
-  PLAN_REGISTRY_ID: "C".repeat(56),
-  VAULT_ID: "C".repeat(56),
-  SUBSCRIPTION_ID: "C".repeat(56),
+  PLAN_REGISTRY_ID: VALID_CONTRACT_ID,
+  VAULT_ID: VALID_CONTRACT_ID,
+  SUBSCRIPTION_ID: VALID_CONTRACT_ID,
 };
 
 describe("soroban rpc endpoints", () => {
@@ -75,7 +79,59 @@ describe("keeper order", () => {
   });
 });
 
-const ID = "C".repeat(56);
+describe("keeper channel secrets", () => {
+  test("defaults to no channels, so single-key setups are untouched", () => {
+    assert.deepEqual(loadConfig({ ...BASE }).KEEPER_CHANNEL_SECRETS, []);
+  });
+
+  test("a comma-separated list is split, trimmed and kept in order", () => {
+    const a = Keypair.random().secret();
+    const b = Keypair.random().secret();
+    assert.deepEqual(
+      loadConfig({ ...BASE, KEEPER_CHANNEL_SECRETS: ` ${a} , ${b}` }).KEEPER_CHANNEL_SECRETS,
+      [a, b],
+    );
+  });
+
+  test("blanks between commas are dropped", () => {
+    const a = Keypair.random().secret();
+    assert.deepEqual(
+      loadConfig({ ...BASE, KEEPER_CHANNEL_SECRETS: `,${a},` }).KEEPER_CHANNEL_SECRETS,
+      [a],
+    );
+  });
+
+  test("anything that is not a Stellar secret seed is rejected", () => {
+    assert.throws(
+      () => loadConfig({ ...BASE, KEEPER_CHANNEL_SECRETS: "not-a-secret" }),
+      /KEEPER_CHANNEL_SECRETS/,
+    );
+    assert.throws(
+      () =>
+        loadConfig({
+          ...BASE,
+          KEEPER_CHANNEL_SECRETS: `${Keypair.random().secret()},GB343X4K4TIYARSAAQZ55RIZY2YLFNOQCM3LNQSRBV56TMVGIF55WCOH`,
+        }),
+      /KEEPER_CHANNEL_SECRETS/,
+      "a public key is not a signing secret",
+    );
+  });
+});
+
+describe("keeper inclusion fee configuration", () => {
+  test("uses the default percentile and cap", () => {
+    const config = loadConfig(env());
+    assert.equal(config.KEEPER_FEE_PERCENTILE, "90");
+    assert.equal(config.KEEPER_MAX_FEE, 100_000n);
+  });
+
+  test("rejects unsupported percentiles and fees below BASE_FEE", () => {
+    assert.throws(() => loadConfig(env({ KEEPER_FEE_PERCENTILE: "85" })), /KEEPER_FEE_PERCENTILE/);
+    assert.throws(() => loadConfig(env({ KEEPER_MAX_FEE: "1" })), /KEEPER_MAX_FEE/);
+  });
+});
+
+const ID = VALID_CONTRACT_ID;
 
 /** Environment holding only what the default network needs. */
 function env(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -86,6 +142,20 @@ function env(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
     ...overrides,
   };
 }
+
+describe("reconciliation", () => {
+  test("defaults to a ten-minute interval and a 25-mandate sample", () => {
+    const config = loadConfig(env());
+    assert.equal(config.RECONCILE_INTERVAL_MS, 600_000);
+    assert.equal(config.RECONCILE_SAMPLE_SIZE, 25);
+  });
+
+  test("rejects a non-positive interval and sample size", () => {
+    assert.throws(() => loadConfig(env({ RECONCILE_INTERVAL_MS: "0" })), /RECONCILE_INTERVAL_MS/);
+    assert.throws(() => loadConfig(env({ RECONCILE_INTERVAL_MS: "-1" })), /RECONCILE_INTERVAL_MS/);
+    assert.throws(() => loadConfig(env({ RECONCILE_SAMPLE_SIZE: "0" })), /RECONCILE_SAMPLE_SIZE/);
+  });
+});
 
 describe("network configs", () => {
   test("with no NETWORKS there is exactly the default network", () => {
@@ -140,6 +210,89 @@ describe("network configs", () => {
     assert.throws(
       () => networkConfigs(config, env(overrides)),
       /Invalid network name "main net"/,
+    );
+  });
+});
+
+describe("optional variables left blank", () => {
+  test("an empty OTLP endpoint means tracing is off, not a bad URL", () => {
+    // The shipped .env.example leaves the variable blank, and a container
+    // that reads that file must still start.
+    assert.equal(
+      loadConfig(env({ OTEL_EXPORTER_OTLP_ENDPOINT: "" })).OTEL_EXPORTER_OTLP_ENDPOINT,
+      undefined,
+    );
+    assert.equal(loadConfig(env()).OTEL_EXPORTER_OTLP_ENDPOINT, undefined);
+  });
+
+  test("a real endpoint is kept and a malformed one is rejected", () => {
+    assert.equal(
+      loadConfig(env({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318" }))
+        .OTEL_EXPORTER_OTLP_ENDPOINT,
+      "http://localhost:4318",
+    );
+    assert.throws(
+      () => loadConfig(env({ OTEL_EXPORTER_OTLP_ENDPOINT: "not-a-url" })),
+      /OTEL_EXPORTER_OTLP_ENDPOINT/,
+    );
+  });
+});
+
+describe("the shipped .env.example", () => {
+  test("is a configuration the service can start with", () => {
+    // The file a new contributor copies is the one a container reads, so a
+    // blank value in it must not stop the process from starting.
+    const contents = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+    const config = loadConfig(parseEnv(contents));
+    assert.equal(
+      config.PLAN_REGISTRY_ID,
+      "CDQ5EJTVXXX2CBMHWP3BGGUDHSK6D4I25IF5XXH3QGL2TNTBMJUOFKDB",
+    );
+    assert.equal(config.KEEPER_ENABLED, false);
+    assert.equal(config.OTEL_EXPORTER_OTLP_ENDPOINT, undefined);
+  });
+});
+
+describe("Stellar identifier validation", () => {
+  test("accepts a valid contract id and secret seed", () => {
+    const secret = Keypair.random().secret();
+    const config = loadConfig({ ...BASE, KEEPER_SECRET: secret });
+    assert.equal(config.PLAN_REGISTRY_ID, VALID_CONTRACT_ID);
+    assert.equal(config.KEEPER_SECRET, secret);
+  });
+
+  test("rejects a public key where a contract id is required", () => {
+    const publicKey = Keypair.random().publicKey();
+    assert.throws(
+      () => loadConfig({ ...BASE, PLAN_REGISTRY_ID: publicKey }),
+      /PLAN_REGISTRY_ID: must be a valid Stellar contract ID/,
+    );
+  });
+
+  test("rejects a malformed contract id and names the variable", () => {
+    assert.throws(
+      () => loadConfig({ ...BASE, VAULT_ID: "C".repeat(56) }),
+      /VAULT_ID: must be a valid Stellar contract ID/,
+    );
+  });
+
+  test("rejects malformed keeper secrets without echoing them", () => {
+    const secret = "S".repeat(56);
+    assert.throws(
+      () => loadConfig({ ...BASE, KEEPER_SECRET: secret }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /KEEPER_SECRET: must be a valid Stellar secret seed/);
+        assert.equal(error.message.includes(secret), false);
+        return true;
+      },
+    );
+  });
+
+  test("rejects non-string identifiers without including their values", () => {
+    assert.throws(
+      () => loadConfig({ ...BASE, SUBSCRIPTION_ID: 123 as unknown as string }),
+      /SUBSCRIPTION_ID: Invalid input/,
     );
   });
 });

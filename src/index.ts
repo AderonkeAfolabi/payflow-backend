@@ -1,12 +1,14 @@
 import { loadConfig, networkConfigs } from "./config.ts";
 import { openDatabase } from "./lib/db.ts";
 import { makeRpc } from "./lib/stellar.ts";
+import { makeSimulationReader, TokenMetadataService } from "./lib/tokens.ts";
 import { createApp } from "./app.ts";
 import { Indexer } from "./indexer.ts";
 import { Keeper } from "./keeper.ts";
 import type { AdminHooks } from "./routes/admin.ts";
 import { logger } from "./lib/logger.ts";
 import { drain, every, serial, type Loop } from "./lib/loop.ts";
+import { Reconciler } from "./reconcile.ts";
 import { initTelemetry, withSpan } from "./lib/telemetry.ts";
 
 const config = loadConfig();
@@ -34,7 +36,25 @@ const runtimes = networks.map((network) => {
       throw err;
     }
   });
-  return { network, db, server, indexer, runPass };
+  // Token metadata is read from the token contract itself through the same
+  // RPC failover the indexer uses, cached by contract id (see lib/tokens.ts).
+  const tokens = new TokenMetadataService(
+    makeSimulationReader(server, network.networkPassphrase),
+    { networkPassphrase: network.networkPassphrase },
+  );
+  // Re-reads a sample of active mandates from the contract and repairs any
+  // drift the indexer missed (RPC gap, bug, outage mid-range).
+  const reconciler = new Reconciler(
+    db,
+    server,
+    network.subscriptionId,
+    network.networkPassphrase,
+    config.RECONCILE_SAMPLE_SIZE,
+    // A repaired mandate changes the merchant's summary; evict it so the API
+    // serves the corrected projection instead of a stale cache entry.
+    (merchant) => indexer.merchantCache.invalidate(merchant),
+  );
+  return { network, db, server, indexer, runPass, tokens, reconciler };
 });
 const defaultRuntime = runtimes[0]!;
 
@@ -49,7 +69,10 @@ if (keeper) {
       "keeper settles the default network only",
     );
   }
-  logger.info({ keeper: keeper.publicKey, network: defaultRuntime.network.name }, "keeper enabled");
+  logger.info(
+    { keeper: keeper.publicKey, channels: keeper.channelCount, network: defaultRuntime.network.name },
+    "keeper enabled",
+  );
 } else {
   logger.info("keeper disabled (KEEPER_ENABLED=false)");
 }
@@ -88,15 +111,18 @@ const adminHooks: AdminHooks = {
 if (keeper && runKeeperPass) {
   adminHooks.keeperPass = () => runKeeperPass();
   adminHooks.keeperBackoff = () => keeper.backoffList();
+  adminHooks.keeperHistory = () => keeper.passHistory();
 }
 
 const app = createApp(
   runtimes.map((rt) => ({
     config: rt.network,
     db: rt.db,
+    events: rt.indexer.events,
     indexer: rt.indexer.status,
     summaryCache: rt.indexer.merchantCache,
     rpc: rt.server,
+    tokens: rt.tokens,
   })),
   config,
   adminHooks,
@@ -118,6 +144,35 @@ for (const rt of runtimes) {
         await rt.runPass();
       } catch {
         // Handled in runPass
+      }
+    }),
+  );
+  loops.push(
+    every(config.RECONCILE_INTERVAL_MS, async () => {
+      try {
+        const r = await rt.reconciler.tick();
+        rt.indexer.status.reconciliations = (rt.indexer.status.reconciliations ?? 0) + 1;
+        rt.indexer.status.corrections = (rt.indexer.status.corrections ?? 0) + r.corrections;
+        if (r.errors > 0) {
+          logger.warn(
+            {
+              network: rt.network.name,
+              sampled: r.sampled,
+              onChain: r.onChain,
+              errors: r.errors,
+              lastError: r.lastError,
+            },
+            "reconcile pass had failures",
+          );
+        }
+        if (r.corrections > 0) {
+          logger.info(
+            { network: rt.network.name, corrections: r.corrections, sampled: r.sampled },
+            "reconcile pass corrected drift",
+          );
+        }
+      } catch {
+        // Reconciler.tick logs and swallows its own failures; this is defensive.
       }
     }),
   );

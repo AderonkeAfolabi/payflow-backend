@@ -90,6 +90,29 @@ describe("indexer projections", () => {
     assert.equal(row.fee_bps, 100);
   });
 
+  test("fee changes are projected once and preserve the latest rate", () => {
+    const changed = event("fee_changed", [MERCHANT], {
+      old_fee_bps: 100n,
+      new_fee_bps: 125n,
+    });
+    ix.apply(changed);
+    ix.apply(changed);
+    ix.apply({
+      ...changed,
+      txHash: "tx-fee-2",
+      ledger: 101,
+      data: { old_fee_bps: 125n, new_fee_bps: 150n },
+    });
+
+    const history = d
+      .prepare("SELECT tx_hash, old_fee_bps, new_fee_bps FROM fee_history ORDER BY ledger DESC")
+      .all() as { tx_hash: string; old_fee_bps: number; new_fee_bps: number }[];
+    assert.deepEqual(history.map((row) => ({ ...row })), [
+      { tx_hash: "tx-fee-2", old_fee_bps: 125, new_fee_bps: 150 },
+      { tx_hash: "tx-fee_changed", old_fee_bps: 100, new_fee_bps: 125 },
+    ]);
+  });
+
   test("deactivating a plan flips the flag", () => {
     ix.apply(planCreated);
     ix.apply(event("plan_status_changed", [MERCHANT, 1n], { active: false }));
@@ -124,6 +147,22 @@ describe("indexer projections", () => {
     assert.equal(row.merchant, MERCHANT);
     assert.equal(row.status, "Active");
     assert.equal(row.charges_made, 0);
+  });
+
+  test("emits a live event only after its projection has been applied", () => {
+    const received: DecodedEvent[] = [];
+    ix.events.on("applied", (e: DecodedEvent) => received.push(e));
+
+    ix.apply(subscribed);
+    ix.apply(charged(1, 1_700_060_000, "tx-live"));
+    ix.apply(event("some_future_event", [], { x: 1n }));
+
+    assert.deepEqual(received.map((e) => e.name), ["subscribed", "charged"]);
+    assert.equal(
+      (d.prepare("SELECT charges_made FROM mandates WHERE id = 1").get() as { charges_made: number })
+        .charges_made,
+      1,
+    );
   });
 
   test("a charge appends history and advances the mandate", () => {
@@ -170,6 +209,59 @@ describe("indexer projections", () => {
     assert.equal(mandate.charges_made, 1);
   });
 
+  test("a charge is stamped with the ledger close time, not the indexer's clock", () => {
+    // 2025-01-15T12:00:00Z: the chain's clock, long before this test runs.
+    const at = Math.floor(Date.UTC(2025, 0, 15, 12) / 1000);
+    ix.apply(subscribed);
+    ix.apply({ ...charged(1, 1_700_060_000, "tx-close"), closeTime: at });
+
+    const row = d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-close") as {
+      created_at: number;
+    };
+    assert.equal(row.created_at, at * 1000);
+    assert.notEqual(
+      row.created_at,
+      Date.now(),
+      "a backfill must not stamp a charge with the moment it was indexed",
+    );
+  });
+
+  test("replaying a charge leaves its timestamp unchanged", () => {
+    const at = Math.floor(Date.UTC(2025, 0, 15, 12) / 1000);
+    ix.apply(subscribed);
+    ix.apply({ ...charged(1, 1_700_060_000, "tx-replay"), closeTime: at });
+    const first = (
+      d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-replay") as {
+        created_at: number;
+      }
+    ).created_at;
+
+    // The same ledger, applied again as a crashed pass would.
+    ix.apply({ ...charged(1, 1_700_060_000, "tx-replay"), closeTime: at });
+    const second = (
+      d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-replay") as {
+        created_at: number;
+      }
+    ).created_at;
+
+    assert.equal(second, first);
+    assert.equal(second, at * 1000);
+  });
+
+  test("a charge with no close time falls back to the indexer's clock", () => {
+    // The RPC did not report a close time, so there is no chain clock to use.
+    // The fallback is the indexer's wall clock, which is logged: it is the one
+    // value a re-index cannot reproduce.
+    const before = Date.now();
+    ix.apply(subscribed);
+    ix.apply(charged(1, 1_700_060_000, "tx-no-close"));
+
+    const row = d.prepare("SELECT created_at FROM charges WHERE tx_hash = ?").get("tx-no-close") as {
+      created_at: number;
+    };
+    assert.ok(row.created_at >= before && row.created_at <= Date.now());
+  });
+
   test("out-of-order charges never move a mandate backwards", () => {
     ix.apply(subscribed);
     ix.apply(charged(2, 1_700_120_000, "tx-b"));
@@ -207,6 +299,74 @@ describe("indexer projections", () => {
     assert.equal(row.ended_by, "subscriber");
   });
 
+  test("a lifecycle event is logged with the ledger close time", () => {
+    const at = Math.floor(Date.UTC(2025, 0, 15, 12) / 1000);
+    ix.apply({ ...subscribed, closeTime: at });
+    ix.apply({ ...event("cancelled", [1n, SUBSCRIBER], { charges_made: 0 }), closeTime: at + 60 });
+
+    const rows = d
+      .prepare("SELECT mandate_id, slot, merchant, kind, at FROM mandate_events ORDER BY at")
+      .all() as Array<Record<string, unknown>>;
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]!.mandate_id, 1);
+    assert.equal(rows[0]!.slot, "start");
+    assert.equal(rows[0]!.merchant, MERCHANT);
+    assert.equal(rows[0]!.kind, "started");
+    assert.equal(rows[0]!.at, at);
+    assert.equal(rows[1]!.mandate_id, 1);
+    assert.equal(rows[1]!.slot, "departure");
+    assert.equal(rows[1]!.merchant, MERCHANT);
+    assert.equal(rows[1]!.kind, "cancelled");
+    assert.equal(rows[1]!.at, at + 60);
+  });
+
+  test("replaying an event does not log it twice", () => {
+    const at = Math.floor(Date.UTC(2025, 0, 15, 12) / 1000);
+    const sub = { ...subscribed, closeTime: at };
+    const cancel = { ...event("cancelled", [1n, SUBSCRIBER], { charges_made: 0 }), closeTime: at + 60 };
+    ix.apply(sub);
+    ix.apply(cancel);
+    ix.apply(sub);
+    ix.apply(cancel);
+    ix.apply(cancel);
+
+    const count = (
+      d.prepare("SELECT COUNT(*) AS n FROM mandate_events").get() as { n: number }
+    ).n;
+    assert.equal(count, 2, "one start and one departure, however often they arrive");
+  });
+
+  test("a mandate is counted as leaving at most once", () => {
+    const at = Math.floor(Date.UTC(2025, 0, 15, 12) / 1000);
+    ix.apply({ ...subscribed, closeTime: at });
+    ix.apply({ ...event("cancelled", [1n, SUBSCRIBER], { charges_made: 0 }), closeTime: at + 60 });
+    // A second, different departure for the same mandate: the log keeps the
+    // first, so a mandate can never be counted as leaving twice.
+    ix.apply({
+      ...event("mandate_ended", [1n, MERCHANT], { subscriber: SUBSCRIBER, charges_made: 1 }),
+      closeTime: at + 120,
+    });
+
+    const rows = d
+      .prepare("SELECT kind FROM mandate_events WHERE slot = 'departure'")
+      .all() as Array<{ kind: string }>;
+    assert.deepEqual(rows.map((r) => r.kind), ["cancelled"]);
+  });
+
+  test("an event with no ledger close time is not logged", () => {
+    // No close time means no bucket to file the event under, so it is
+    // skipped rather than filed under a guessed time.
+    ix.apply(subscribed);
+    ix.apply(event("cancelled", [1n, SUBSCRIBER], { charges_made: 0 }));
+    const count = (
+      d.prepare("SELECT COUNT(*) AS n FROM mandate_events").get() as { n: number }
+    ).n;
+    assert.equal(count, 0);
+    // The projection itself is still written.
+    const row = d.prepare("SELECT status FROM mandates WHERE id = 1").get() as { status: string };
+    assert.equal(row.status, "Cancelled");
+  });
+
   test("pause toggles only from active states", () => {
     ix.apply(subscribed);
     ix.apply(event("pause_changed", [1n, SUBSCRIBER], { paused: true }));
@@ -225,11 +385,14 @@ describe("indexer projections", () => {
   });
 
   test("vault events are recorded", () => {
-    ix.apply(
-      event("deposit", [SUBSCRIBER, TOKEN], { amount: 50_000_000n, balance: 50_000_000n }),
-    );
+    const deposit = event("deposit", [SUBSCRIBER, TOKEN], {
+      amount: 50_000_000n,
+      balance: 50_000_000n,
+    });
+    ix.apply(deposit);
+    ix.apply(deposit);
     const rows = d.prepare("SELECT * FROM vault_events").all() as Record<string, unknown>[];
-    assert.equal(rows.length, 1);
+    assert.equal(rows.length, 1, "replaying the event cannot duplicate history");
     assert.equal(rows[0]!.kind, "deposit");
     assert.equal(rows[0]!.balance, "50000000");
   });

@@ -47,6 +47,9 @@ replays that range on restart. Every write is designed for that:
 - `plans` and `mandates` are upserts keyed on the on-chain id.
 - `charges` is keyed on `(tx_hash, mandate_id)`, so a replayed ledger cannot
   double-count revenue.
+- A charge is stamped with the **close time of the ledger it was emitted
+  in**, not with the moment the indexer saw it, so a backfill or a restart
+  cannot collapse a merchant's history onto one instant.
 - Mandate updates are guarded by `WHERE charges_made < ?`, so an out-of-order
   event can never move a mandate backwards.
 
@@ -55,7 +58,7 @@ replays that range on restart. Every write is designed for that:
 ```bash
 npm install
 cp .env.example .env      # already points at the deployed testnet contracts
-npm test                  # 149 tests, no network needed
+npm test                  # 394 tests, no network needed
 npm run dev
 ```
 
@@ -70,6 +73,27 @@ Run one settlement pass and exit (needs `KEEPER_SECRET`):
 ```bash
 npm run keeper
 ```
+
+### Running it in Docker
+
+The image carries the service, its dependencies and the Node runtime it needs
+(`node:sqlite` wants Node 22.5 or newer), so a checkout and a `.env` are all
+it takes:
+
+```bash
+cp .env.example .env      # the same file the compose file reads
+docker compose up         # builds the image and serves the API on :8080
+docker compose logs -f api
+```
+
+The projection lives in the named volume `payflow-data`, so the container can
+be recreated without losing the indexer's cursor — it picks up where it left
+off instead of replaying the chain. `docker compose down` removes the
+container and keeps the data; `docker compose down -v` removes the data too.
+
+The image runs `node dist/index.js` as the unprivileged `node` user, and
+[`Dockerfile`](Dockerfile) builds it in two stages: `npm ci && npm run build`
+in the builder, production dependencies only in the final image.
 
 ### How the loops behave
 
@@ -90,12 +114,34 @@ npm run keeper
   empty vault) is retried after 1 minute, then 2, 4 and so on up to 6 hours. A
   success clears it. Without this, 25 underfunded mandates at the front of the
   queue would block every other mandate.
+- **A mandate the vault cannot cover is skipped, not charged.** Before it
+  settles anything, the keeper reads `vault.balance(subscriber, token)` from
+  the contract — a read-only simulation, no transaction and no fee. One read
+  per subscriber and token per pass, so a subscriber with several mandates
+  costs one read, not one each. A mandate whose amount the vault cannot cover
+  is skipped, and the skip is logged once per pass with the shortfall. The
+  other mandates of the pass settle as usual, and a balance that cannot be
+  read (RPC down) is not treated as a shortfall: the charge decides, exactly
+  as before.
 - **Events are validated against the contract spec.** Every decoded event is
   checked against `src/lib/event_spec.json` before it is projected. A renamed
   or retyped contract field makes the event fail validation: it is logged with
   the exact problems, counted in `/health`'s `indexer.mismatchedEvents`, and
   never silently stored as zeros. Update the spec file together with the
   contracts.
+
+### Reconciling the projection with the chain
+
+Idempotent indexing repairs replays, but it cannot repair a missed event: an
+RPC gap or a bug can leave the projection wrong forever. Every
+`RECONCILE_INTERVAL_MS` the reconciler samples `RECONCILE_SAMPLE_SIZE` active
+mandates from the projection, re-reads each one from the subscription
+contract through a read-only `get_mandate` simulation, and compares `status`,
+`charges_made` and `next_charge`. Anything that differs is rewritten in place,
+keyed on the mandate id, so re-running the pass is a no-op once the row
+matches the chain. A failed RPC read is logged and retried on the next pass;
+it never crashes the loop. Corrections are logged and reported on `/health`
+under `indexer.reconciliations` and `indexer.corrections`.
 
 ### Rotating the keeper key without downtime
 
@@ -119,6 +165,32 @@ longer does:
 
 Secrets are never logged; rotation logs only public keys.
 
+### Settling in parallel with channel accounts
+
+A single account can only have one transaction in flight — the next `charge`
+has to wait for the previous one's sequence number — so one key settles a few
+charges per minute and large merchants get billed hours late. List extra
+signing accounts in `KEEPER_CHANNEL_SECRETS` (comma-separated `S...` keys) and
+one pass distributes the due mandates across them:
+
+- Each channel signs and sequences **its own** transactions and pays its own
+  fees, so sequence numbers live on separate accounts and cannot collide.
+  Channel keys need only XLM for fees: `charge` is permissionless, so no
+  channel key holds user funds or any on-chain authority.
+- Due mandates are pulled from one shared queue by one worker per channel —
+  strictly one transaction at a time *within* a channel, several channels in
+  parallel. With a single channel the pass is exactly the old sequential
+  behaviour, and `KEEPER_SECRET` is always the first channel.
+- Before distributing, each channel's account is checked with one `getAccount`.
+  A channel that cannot pay (unfunded, deleted) is skipped for the pass —
+  logged by public key — and its share settles through the live channels
+  instead of backing off against a dead key. `KEEPER_SECRET_NEXT` rotation
+  still applies to the primary channel, before and during the pass.
+
+A fee-bump design (main key pays every fee) was deliberately rejected: a
+Stellar fee-bump consumes the *fee source's* sequence number, so every
+transaction would sequence against the one main account and serialize again.
+
 ## API
 
 Base path `/api`. All amounts are strings in the token's smallest unit
@@ -139,13 +211,24 @@ When extra networks are configured (see below), every route also answers under
 |---|---|---|
 | `GET` | `/health` | Status (`starting`, `ok`, `catching_up`), indexer cursor, lag, `paused` state, data freshness (`freshnessSeconds`), spec-mismatch count, contract IDs, active RPC endpoint |
 | `GET` | `/ready` | Readiness probe: `200 ready` once caught up, `503` (`starting`/`catching_up`) while behind |
+| `GET` | `/metrics` | Prometheus metrics: the indexer's gauges and the keeper's counters (only when `METRICS_ENABLED=true`) |
+| `GET` | `/api/openapi.json` | The OpenAPI 3.1 description of this API |
 | `GET` | `/api/plans?merchant=&limit=` | Published plans |
 | `GET` | `/api/plans/:id` | One plan |
+| `GET` | `/api/plans/:id/stats` | Per-plan statistics: active and total mandates, cancellations, total collected, average charges per mandate |
 | `GET` | `/api/mandates?ids=&subscriber=&merchant=&status=` | Mandates |
 | `GET` | `/api/mandates/:id` | One mandate |
 | `GET` | `/api/mandates/:id/charges` | Settlement history |
-| `GET` | `/api/due` | Mandates chargeable right now |
+| `GET` | `/api/stream?merchant=&subscriber=` | Server-sent `charged`, `subscribed`, `cancelled` and `mandate_ended` events (25-second heartbeat) |
+| `GET` | `/api/vault/:address` | Latest balance per token |
+| `GET` | `/api/vault/:address/events?limit=` | Vault deposit, withdrawal and debit history, newest first |
+| `GET` | `/api/protocol` | Current protocol fee (`fee_bps`) and fee-change history |
+| `GET` | `/api/keeper` | Last 20 keeper passes, failures, skipped mandates and mandate backoff (only when enabled) |
+| `GET` | `/api/due` | Mandates chargeable right now, each with a `funded` flag |
 | `GET` | `/api/merchants/:address/summary` | Active mandates, revenue, MRR and ARR |
+| `GET` | `/api/merchants/:address/subscribers?limit=` | The merchant's distinct subscribers, grouped by lifetime value |
+| `GET` | `/api/merchants/:address/churn?bucket=month&limit=` | Per-bucket churn: mandates started, cancelled, ended and completed, and the net |
+| `GET` | `/api/merchants/:address/revenue?bucket=day&from=&to=` | Revenue over time: gross, fee and net per bucket |
 | `GET` | `/api/merchants/:address/forecast?days=30` | Projected charges over the next N days, net of fees |
 | `GET` | `/api/subscribers/:address/summary` | Mandates and total paid |
 | `GET` | `/api/subscribers/:address/upcoming?days=30` | Charges due over the next N days, with projected times |
@@ -155,6 +238,162 @@ When extra networks are configured (see below), every route also answers under
 mandate ids (`?ids=1,2,3`). Ids that do not exist are omitted; more than 100
 ids returns `400` with `error.code = "too_many_ids"` and a non-numeric id
 returns `400` with `error.code = "invalid_ids"`.
+
+Every address the API takes is checked as a Stellar StrKey — an account
+(`G...`) or a contract (`C...`) — so a mistyped address is a `400
+invalid_request` rather than an empty page. The checksum is checked too: a
+one-character typo has the right shape but the wrong checksum, and it names
+no merchant.
+
+### The OpenAPI description
+
+`GET /api/openapi.json` serves an [OpenAPI 3.1](https://spec.openapis.org/oas/v3.1.0)
+document describing every route above, with the parameters each one takes, the
+responses it answers and the schema of each body. Amounts are documented as
+decimal strings in the token's smallest unit, so a generated client knows not
+to read them as numbers.
+
+The document is served by the instance it belongs to, so it lists the routes
+that instance actually has: the operator endpoints (`/admin/...`), the metrics
+endpoint and the keeper history are in it whatever the configuration says,
+and each says in its description what has to be true for it to answer.
+
+```bash
+curl -s localhost:8080/api/openapi.json | jq '.paths | keys'
+```
+
+A test compares the document with the routes Express registers, so a route
+that is added without being documented fails the build.
+
+### Metrics
+
+With `METRICS_ENABLED=true` the service serves `/metrics` in the Prometheus
+text format. It is off by default: the numbers are operational data, and a
+deployment that does not scrape them should not expose them.
+
+| Metric | Type | What it says |
+|---|---|---|
+| `payflow_indexer_cursor` | gauge | The ledger up to which events have been projected |
+| `payflow_indexer_latest_ledger` | gauge | The latest ledger the RPC node reported |
+| `payflow_indexer_lag` | gauge | How many ledgers the projection trails the network by |
+| `payflow_events_applied_total` | counter | Contract events applied to the projection |
+| `payflow_charges_settled_total` | counter | Charges the keeper settled |
+| `payflow_charges_failed_total` | counter | Charges the keeper could not settle |
+| `payflow_keeper_passes_total` | counter | Keeper passes run |
+
+The three indexer gauges carry a `network` label, so an instance that serves
+testnet and mainnet reports both. The counters are the process's own totals:
+they reset when the process restarts, which is what Prometheus expects.
+
+### The due list and the vault balance
+
+`GET /api/due` lists the mandates that can be charged right now. Each one
+carries a `funded` flag: whether the last vault balance the indexer saw covers
+the charge.
+
+```json
+{
+  "now": 1750000000,
+  "due": [
+    {
+      "id": 7,
+      "subscriber": "GAIJKXL3Q45ZR32QRDVPUDD4DPLT5GYCHJFESQPHHWJRYX4YZCG25JJR",
+      "merchant": "GB343X4K4TIYARSAAQZ55RIZY2YLFNOQCM3LNQSRBV56TMVGIF55WCOH",
+      "next_charge": 1749999940,
+      "amount": "10000000",
+      "funded": true
+    }
+  ]
+}
+```
+
+The balance is the one the indexer last saw, so it can be behind the chain: a
+subscriber who has just funded their vault is reported as not funded until the
+deposit is indexed. The keeper does not rely on it — it reads
+`vault.balance(subscriber, token)` from the contract before it settles
+anything, and skips a mandate the vault cannot cover. A skipped mandate is
+logged once per pass with the shortfall, and it does not take the pass's place:
+the other mandates settle as usual.
+
+### Merchant churn
+
+`GET /api/merchants/:address/churn` reports how a merchant's mandate base
+moved over time: how many mandates started, how many departed (cancelled by
+the subscriber, ended by the merchant, or completed their full charge count),
+and the net of the two.
+
+```json
+{
+  "merchant": "GB343X4K4TIYARSAAQZ55RIZY2YLFNOQCM3LNQSRBV56TMVGIF55WCOH",
+  "bucket": "month",
+  "buckets": [
+    {
+      "bucket": "2025-01",
+      "started": 3,
+      "cancelled": 1,
+      "ended": 0,
+      "completed": 2,
+      "net": 0
+    }
+  ],
+  "totals": { "started": 3, "cancelled": 1, "ended": 0, "completed": 2, "net": 0 }
+}
+```
+
+- `bucket` picks the period: `day`, `week` or `month` (the default). Buckets
+  are calendar periods in UTC — a month bucket is labelled `2025-01`, a day
+  bucket `2025-01-15`, and a week bucket carries the Monday's date.
+- `limit` caps how many of the most recent buckets are reported (12 by
+  default, 120 at most). Every bucket in the range is present, so a chart has
+  no gaps in it.
+- `net` is `started` minus the departures, i.e. the growth of the mandate
+  base in that bucket.
+
+The counts are bucketed by the **ledger close time** of each event, so they
+describe the chain's own history rather than when the indexer happened to
+index it. Replaying a ledger range therefore leaves the report unchanged.
+
+### Merchant revenue
+
+`GET /api/merchants/:address/revenue` reports what a merchant took in, what
+the protocol took and what was left, over time — the time series behind the
+lifetime totals of `/summary`.
+
+```json
+{
+  "merchant": "GB343X4K4TIYARSAAQZ55RIZY2YLFNOQCM3LNQSRBV56TMVGIF55WCOH",
+  "bucket": "day",
+  "from": null,
+  "to": null,
+  "buckets": [
+    {
+      "bucket": "2025-01-15",
+      "gross": "10000000",
+      "fee": "100000",
+      "net": "9900000",
+      "charges": 1
+    }
+  ],
+  "totals": { "gross": "10000000", "fee": "100000", "net": "9900000", "charges": 1 }
+}
+```
+
+- `bucket` picks the period: `day`, `week` or `month` (the default). Buckets
+  are calendar periods in UTC, labelled like the churn report's.
+- `from` and `to` bound the range in unix seconds, half-open: a charge
+  exactly at `to` is excluded. Without them the report covers the merchant's
+  whole history, and the response echoes the range it was given (`null` when
+  it was unbounded).
+- `limit` caps how many of the most recent buckets are reported (366 by
+  default, 1000 at most). Every bucket between the first and the last one
+  with data is present, so a chart has no gaps in it.
+- `gross` is what the subscribers paid (the charge amount plus the fee),
+  `fee` is the protocol's share of it and `net` is what the merchant kept,
+  so `gross − fee = net`. All three are decimal strings in the token's
+  smallest unit, like every other amount in this API.
+- The buckets are taken from the **ledger close time** of each charge, not
+  from when the indexer saw it, so the report is the chain's own history and
+  replaying a ledger range leaves it unchanged.
 
 ### Error responses
 
@@ -177,17 +416,36 @@ a stable `code` and show the human-readable `message` without parsing prose:
   SQL value, or an RPC URL — `internal_error` always uses fixed copy.
 - `requestId` echoes the response's `X-Request-Id` header so a report can be
   tied to the matching server log line. It is `null` only if no id was minted.
+- `details` is present for `invalid_request` only: one entry per parameter
+  that was wrong, naming it and saying what was expected.
 
 > **Migration note.** This envelope replaces the earlier `{ "error": "<code>" }`
 > string body. Consumers that read the error must now read `error.code`.
 
+> **Migration note (parameters).** A parameter the API does not accept is now
+> answered with `400 invalid_request` instead of being ignored: a mistyped
+> address, an unknown `status`, a non-numeric id, a malformed `limit`, `days`
+> or `bucket`. Before, those were cast and quietly matched nothing, so a
+> client bug looked like an empty page. Valid requests are unaffected; an
+> empty value (`?merchant=`) still means "no filter".
+
+> **Migration note (charges).** `GET /api/mandates/:id/charges` now answers
+> `404 mandate_not_found` for a mandate that does not exist, like
+> `GET /api/mandates/:id` does. Before, it answered `200` with an empty
+> list, so "no such mandate" and "no charges yet" looked the same.
+
 | `error.code` | HTTP | Where |
 |---|---|---|
 | `not_found` | 404 | An unknown path, or a method/path the API does not expose |
-| `plan_not_found` | 404 | `GET /api/plans/:id` with no such plan |
-| `mandate_not_found` | 404 | `GET /api/mandates/:id` with no such mandate |
+| `plan_not_found` | 404 | `GET /api/plans/:id` or `GET /api/plans/:id/stats` with no such plan |
+| `mandate_not_found` | 404 | `GET /api/mandates/:id` or `GET /api/mandates/:id/charges` with no such mandate |
 | `invalid_ids` | 400 | `?ids=` contains a non-positive-integer token |
 | `too_many_ids` | 400 | `?ids=` lists more than 100 ids |
+| `invalid_request` | 400 | A query or path parameter is not valid; `error.details` says which |
+| `invalid_token_id` | 400 | `GET /api/tokens/:id` with a malformed contract id |
+| `token_metadata_unavailable` | 502 | `GET /api/tokens/:id` while the token contract cannot be read |
+| `rate_limited` | 429 | API request exceeded the configured per-IP limit; includes `Retry-After` |
+| `stream_limit` | 503 | `GET /api/stream` when the concurrent stream cap is reached |
 | `unauthorized` | 401 | A `/admin/*` request without a valid bearer token |
 | `reindex_unavailable` | 503 | `POST /admin/reindex` on a process without an indexer |
 | `indexer_unavailable` | 503 | `/admin/indexer/pause`/`resume` on a process without an indexer |
@@ -339,13 +597,21 @@ examined without API downtime.
 | `KEEPER_ENABLED` | `false` | Turn on automatic settlement |
 | `KEEPER_SECRET` | — | `S...` key that pays settlement fees. Required when the keeper is on |
 | `KEEPER_SECRET_NEXT` | — | Standby `S...` key for zero-downtime rotation; see [Rotating the keeper key](#rotating-the-keeper-key-without-downtime) |
+| `KEEPER_CHANNEL_SECRETS` | *(empty)* | Extra `S...` channel keys, comma-separated: each settles in parallel with its own sequence and fees; see [Settling in parallel with channel accounts](#settling-in-parallel-with-channel-accounts) |
 | `KEEPER_INTERVAL_MS` | `60000` | Settlement poll interval |
 | `KEEPER_ORDER` | `oldest` | Order for due mandates: `oldest` (due date ascending) or `largest` (amount descending) |
+| `KEEPER_FEE_PERCENTILE` | `90` | Soroban inclusion-fee percentile used for charge transactions (`50`, `60`, `70`, `80`, `90`, `95`, or `99`) |
+| `KEEPER_MAX_FEE` | `100000` | Maximum inclusion fee in stroops; congestion retries cannot exceed this cap |
 | `INDEXER_INTERVAL_MS` | `10000` | Indexing poll interval |
 | `INDEXER_FETCH_CONCURRENCY` | `4` | Ledger windows one pass may fetch at once (max 16). Applied in order; `1` is sequential |
 | `INDEXER_START_LEDGER` | `0` | Where to start with no saved cursor. `0` starts from the oldest ledger RPC still serves |
+| `RECONCILE_INTERVAL_MS` | `600000` | How often the reconciler re-checks a sample of active mandates against the contract state, in ms |
+| `RECONCILE_SAMPLE_SIZE` | `25` | Active mandates sampled per reconcile pass; each sample costs one read-only RPC simulation |
 | `DATABASE_PATH` | `./payflow.db` | SQLite file |
 | `PORT` | `8080` | HTTP port |
+| `API_RATE_LIMIT_WINDOW_MS` | `60000` | Per-IP API rate-limit window in milliseconds |
+| `API_RATE_LIMIT_MAX` | `120` | Maximum requests per IP in each API rate-limit window |
+| `METRICS_ENABLED` | `false` | Serve the Prometheus metrics at `/metrics` |
 | `CORS_ORIGIN` | `*` | Comma-separated allowed origins |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP collector base URL. Unset disables tracing at no cost |
 | `SHUTDOWN_TIMEOUT_MS` | `15000` | How long shutdown waits for in-flight passes |
@@ -447,6 +713,10 @@ Pushing a `v*` tag publishes `ghcr.io/mmm-pay/payflow-backend:<version>` via
 docker run --env-file .env -v payflow_data:/data ghcr.io/mmm-pay/payflow-backend:0.2.0
 ```
 
+For local work, [`docker-compose.yml`](docker-compose.yml) runs the same
+image with `.env` and a named volume (see [Running it in
+Docker](#running-it-in-docker)).
+
 ## Related repositories
 
 | Repo | Role |
@@ -459,8 +729,9 @@ docker run --env-file .env -v payflow_data:/data ghcr.io/mmm-pay/payflow-backend
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). CI runs `lint`, `typecheck`, `test`,
-`build` and a production `audit`; all five must pass, and Dependabot keeps
-dependencies current. Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+`build`, a container build and a production `audit`; all six must pass, and
+Dependabot keeps dependencies current. Changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 

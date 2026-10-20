@@ -11,6 +11,13 @@ npm test
 Node 22.5+ is required — the service uses the built-in `node:sqlite` module and
 native TypeScript execution.
 
+The same service runs in a container, with the projection on a named volume:
+
+```bash
+cp .env.example .env
+docker compose up
+```
+
 ## What CI enforces
 
 | Job | Command |
@@ -19,6 +26,7 @@ native TypeScript execution.
 | `typecheck` | `npm run typecheck` |
 | `test` | `npm test` |
 | `build` | `npm run build` |
+| `docker build` | builds the image, pushes nothing |
 | `audit` | `npm audit --omit=dev --audit-level=high` |
 
 Dependencies are kept current by [Dependabot](.github/dependabot.yml), which
@@ -26,6 +34,11 @@ opens weekly updates for npm packages and GitHub Actions.
 
 ## Code standards
 
+- **Pin actions to a commit SHA.** Write `uses: owner/action@<sha> # v1.2.3`,
+  never a tag: a tag can be moved, and a moved tag runs someone else's code
+  with the workflow's token. Dependabot updates the SHA and the comment.
+- **Give every workflow and job the least permissions it needs.** List them
+  explicitly with a comment saying what each one is for.
 - **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`, and
   `exactOptionalPropertyTypes` are on. Do not weaken them; fix the type.
 - **No TypeScript parameter properties.** Node's type stripping rejects them.

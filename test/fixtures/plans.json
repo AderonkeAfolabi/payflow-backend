@@ -8,7 +8,9 @@
       "amount": "10000000",
       "period": 2592000,
       "active": 1,
-      "ledger": 1
+      "ledger": 1,
+      "tokenSymbol": null,
+      "decimals": null
     }
   ]
 }

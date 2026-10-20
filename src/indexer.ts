@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { EventEmitter } from "node:events";
 import { rpc } from "@stellar/stellar-sdk";
 import type { Config, NetworkConfig } from "./config.ts";
 
@@ -8,29 +9,16 @@ import {
   big,
   decodeEvent,
   num,
+  parseCloseTime,
   specProblems,
   str,
   type DecodedEvent,
 } from "./lib/stellar.ts";
 import { logger } from "./lib/logger.ts";
+import { metrics, publishIndexerMetrics } from "./lib/metrics.ts";
 import { defaultMerchantSummaryCache, type MerchantSummaryCache } from "./routes/index.ts";
 
-/** Helper to parse a ledger close time into unix epoch seconds. */
-export function parseCloseTime(raw: unknown): number | null {
-  if (raw === undefined || raw === null) return null;
-  if (typeof raw === "number") {
-    return raw > 1e11 ? Math.floor(raw / 1000) : raw;
-  }
-  if (typeof raw === "string") {
-    const asNum = Number(raw);
-    if (!Number.isNaN(asNum) && asNum > 0) {
-      return asNum > 1e11 ? Math.floor(asNum / 1000) : asNum;
-    }
-    const parsed = Date.parse(raw);
-    if (!Number.isNaN(parsed)) return Math.floor(parsed / 1000);
-  }
-  return null;
-}
+export { parseCloseTime };
 
 /** RPC caps a single getEvents window; stay well inside it. */
 const LEDGER_WINDOW = 8_000;
@@ -80,12 +68,25 @@ export interface IndexerStatus {
    * the API keeps serving. Reported on `/health`.
    */
   paused?: boolean;
+  /**
+   * Reconcile passes run since process start. Each pass re-reads a sample of
+   * active mandates from the contract and repairs drift the indexer may have
+   * missed.
+   */
+  reconciliations?: number;
+  /**
+   * Mandate rows the reconciler has brought back in line with the chain since
+   * process start. Reported on `/health`; a growing count means the indexer
+   * is silently missing on-chain state.
+   */
+  corrections?: number;
 }
 
 export class Indexer {
   private readonly db: DatabaseSync;
   private readonly server: IndexerRpc;
   private readonly config: IndexerConfig;
+  readonly events = new EventEmitter();
   readonly merchantCache: MerchantSummaryCache;
   readonly status: IndexerStatus = {
     cursor: 0,
@@ -127,6 +128,9 @@ export class Indexer {
     this.server = server;
     this.config = config;
     this.merchantCache = merchantCache;
+    // Publish the starting state, so a scrape sees the series from the first
+    // moment and not only once the first pass has run.
+    this.publishMetrics(0);
   }
 
   private contractIds(): string[] {
@@ -142,6 +146,33 @@ export class Indexer {
       this.config.VAULT_ID,
       this.config.SUBSCRIPTION_ID,
     ];
+  }
+
+  /**
+   * The network this indexer reads, as it appears on the metrics' `network`
+   * label. A configuration built from the environment names it too, so the
+   * label is the same either way.
+   */
+  private get networkLabel(): string {
+    if ("name" in this.config) return this.config.name;
+    return this.config.STELLAR_NETWORK ?? "default";
+  }
+
+  /**
+   * Publish the indexer's progress to the metrics registry.
+   *
+   * The gauges are the ones an operator alerts on: how far the projection has
+   * got, how far the network has got, and the difference between them. The
+   * counter counts the events the projection has absorbed.
+   *
+   * A pass that fails still publishes: the cursor it reached is the truth the
+   * operator needs, and the lag it leaves behind is exactly what the alert is
+   * for.
+   */
+  private publishMetrics(applied: number): void {
+    const network = this.networkLabel;
+    publishIndexerMetrics(this.status, network);
+    if (applied > 0) metrics.increment("events_applied", applied, { network });
   }
 
   /**
@@ -245,6 +276,7 @@ export class Indexer {
     // write nothing, so the saved cursor and projection are untouched and the
     // loop resumes exactly where it left off on resume.
     if (this.status.paused) {
+      this.publishMetrics(0);
       return { applied: 0, mismatched: 0, cursor: this.status.cursor, latest: this.status.latest };
     }
     const latestRes = await this.server.getLatestLedger();
@@ -256,6 +288,7 @@ export class Indexer {
     if (start > latest) {
       this.status.cursor = start;
       this.updateFreshness(latestCloseTime, null, start, latest);
+      this.publishMetrics(0);
       return { applied: 0, mismatched: 0, cursor: start, latest };
     }
 
@@ -265,6 +298,7 @@ export class Indexer {
     if (end <= start) {
       this.status.cursor = start;
       this.updateFreshness(latestCloseTime, null, start, latest);
+      this.publishMetrics(0);
       return { applied: 0, mismatched: 0, cursor: start, latest };
     }
 
@@ -312,6 +346,7 @@ export class Indexer {
 
     this.status.cursor = cursor;
     this.updateFreshness(latestCloseTime, lastSeenCloseTime, cursor, latest);
+    this.publishMetrics(applied);
     if (failure !== undefined) throw failure;
     return { applied, mismatched, cursor, latest };
   }
@@ -361,23 +396,43 @@ export class Indexer {
       case "plan_status_changed":
         this.onPlanStatus(e);
         return "applied";
-      case "subscribed":
+      case "subscribed": {
+        const [, , merchant] = e.topics;
         this.onSubscribed(e);
+        this.recordChurn(e, "started", str(merchant));
+        this.events.emit("applied", e);
         return "applied";
+      }
       case "charged":
         this.onCharged(e);
+        this.events.emit("applied", e);
         return "applied";
-      case "cancelled":
-        this.onStatus(e, "Cancelled", "subscriber");
+      case "cancelled": {
+        // The cancel event names the subscriber, not the merchant, so the
+        // merchant comes from the mandate row the projection holds.
+        const merchant = this.onStatus(e, "Cancelled", "subscriber");
+        this.recordChurn(e, "cancelled", merchant);
+        this.events.emit("applied", e);
         return "applied";
-      case "mandate_ended":
-        this.onStatus(e, "Cancelled", "merchant");
+      }
+      case "mandate_ended": {
+        // The end event names the merchant in its second topic; the mandate
+        // row is the fallback when the projection has not seen it yet.
+        const merchant = this.onStatus(e, "Cancelled", "merchant") ?? str(e.topics[1]);
+        this.recordChurn(e, "ended", merchant);
+        this.events.emit("applied", e);
         return "applied";
-      case "mandate_completed":
-        this.onStatus(e, "Completed");
+      }
+      case "mandate_completed": {
+        const merchant = this.onStatus(e, "Completed");
+        this.recordChurn(e, "completed", merchant);
         return "applied";
+      }
       case "pause_changed":
         this.onPauseChanged(e);
+        return "applied";
+      case "fee_changed":
+        this.onFeeChanged(e);
         return "applied";
       case "deposit":
       case "withdraw":
@@ -449,6 +504,32 @@ export class Indexer {
       );
   }
 
+  /**
+   * When the charge happened, in unix milliseconds.
+   *
+   * The ledger's close time is the chain's own clock, so the same charge
+   * carries the same timestamp however often it is indexed: a backfill or a
+   * restart after a deploy no longer collapses the whole history onto one
+   * moment, and a report bucketed by it describes the chain rather than the
+   * indexer. The row is written with `INSERT OR IGNORE`, so a replay leaves
+   * the stored value untouched.
+   *
+   * An event that carried no close time has no chain clock to use; the
+   * indexer's wall clock is the fallback, and it is logged because it is the
+   * one value that is not reproducible.
+   */
+  private chargedAt(e: DecodedEvent): number {
+    const closeTime = e.closeTime;
+    if (closeTime === undefined || closeTime === null) {
+      logger.warn(
+        { txHash: e.txHash, ledger: e.ledger },
+        "charge has no ledger close time; stamped with the indexer's clock instead",
+      );
+      return Date.now();
+    }
+    return closeTime * 1000;
+  }
+
   private onCharged(e: DecodedEvent): void {
     const [mandateId, subscriber, merchant] = e.topics;
     const id = num(mandateId);
@@ -471,7 +552,7 @@ export class Indexer {
         num(e.data.charges_made),
         num(e.data.next_charge),
         e.ledger,
-        Date.now(),
+        this.chargedAt(e),
       );
 
     // The Charged event carries next_charge but not last_charge. The contract
@@ -495,8 +576,17 @@ export class Indexer {
       );
   }
 
-  /** `endedBy` records which side cancelled; completion leaves it null. */
-  private onStatus(e: DecodedEvent, status: string, endedBy: string | null = null): void {
+  /**
+   * `endedBy` records which side cancelled; completion leaves it null.
+   *
+   * Returns the mandate's merchant, which the churn log needs and which only
+   * the projection knows for the events that do not name it themselves.
+   */
+  private onStatus(
+    e: DecodedEvent,
+    status: string,
+    endedBy: string | null = null,
+  ): string | undefined {
     const [mandateId] = e.topics;
     const mid = num(mandateId);
     const row = this.db.prepare("SELECT merchant FROM mandates WHERE id = ?").get(mid) as
@@ -506,6 +596,47 @@ export class Indexer {
     this.db
       .prepare("UPDATE mandates SET status = ?, ended_by = ? WHERE id = ?")
       .run(status, endedBy, mid);
+    return row?.merchant;
+  }
+
+  /**
+   * Record a mandate lifecycle event in the churn log.
+   *
+   * The row is keyed on (mandate_id, slot) and written with INSERT OR IGNORE,
+   * so replaying a ledger range leaves the log unchanged. `at` is the
+   * ledger's close time, so an event lands in the same bucket however many
+   * times it is applied.
+   *
+   * `slot` is 'start' or 'departure': a mandate has one start and at most one
+   * departure, so a mandate that is both started and cancelled contributes to
+   * both counts but can never be counted as leaving twice.
+   */
+  private recordChurn(
+    e: DecodedEvent,
+    kind: "started" | "cancelled" | "ended" | "completed",
+    merchant: string | undefined,
+  ): void {
+    // Without a merchant there is nobody to attribute the event to, and
+    // without a close time there is no bucket to file it under. Either way
+    // the projection itself is already written, so the event is skipped
+    // rather than guessed at.
+    if (!merchant) return;
+    const at = e.closeTime;
+    if (at === undefined || at === null) return;
+    const [mandateId] = e.topics;
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO mandate_events (mandate_id, slot, merchant, kind, at, ledger)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        num(mandateId),
+        kind === "started" ? "start" : "departure",
+        merchant,
+        kind,
+        at,
+        e.ledger,
+      );
   }
 
   private onPauseChanged(e: DecodedEvent): void {
@@ -539,6 +670,20 @@ export class Indexer {
         counterparty === undefined ? null : str(counterparty),
         big(e.data.amount),
         big(e.data.balance),
+        e.ledger,
+      );
+  }
+
+  private onFeeChanged(e: DecodedEvent): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO fee_history (tx_hash, old_fee_bps, new_fee_bps, ledger)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        e.txHash,
+        num(e.data.old_fee_bps),
+        num(e.data.new_fee_bps),
         e.ledger,
       );
   }

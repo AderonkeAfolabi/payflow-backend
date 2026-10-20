@@ -1,5 +1,7 @@
 import { Router } from "express";
+import type { EventEmitter } from "node:events";
 import type { DatabaseSync } from "node:sqlite";
+import type { TokenMetadataService } from "../lib/tokens.ts";
 import { mandatesRouter } from "./mandates.ts";
 import {
   defaultMerchantSummaryCache,
@@ -7,8 +9,12 @@ import {
   MerchantSummaryCache,
 } from "./merchants.ts";
 import { plansRouter } from "./plans.ts";
+import { protocolRouter } from "./protocol.ts";
 import { statsRouter } from "./stats.ts";
 import { subscribersRouter } from "./subscribers.ts";
+import { tokensRouter } from "./tokens.ts";
+import { streamRouter } from "./stream.ts";
+import { vaultRouter } from "./vault.ts";
 
 export { defaultMerchantSummaryCache, MerchantSummaryCache };
 
@@ -17,6 +23,9 @@ export interface NetworkRoutes {
   db: DatabaseSync;
   summaryCache?: MerchantSummaryCache | undefined;
   defaultToken?: string | undefined;
+  /** Resolves this network's token contract ids to symbol/name/decimals. */
+  tokens: TokenMetadataService;
+  events?: EventEmitter | undefined;
 }
 
 /**
@@ -32,15 +41,32 @@ export function buildApiRouter(networks: NetworkRoutes[]): Router {
   }
   const router = Router();
   for (const network of networks) {
-    router.use(`/${network.name}`, buildRoutes(network.db, network.summaryCache, network.defaultToken));
+    router.use(
+      `/${network.name}`,
+      buildRoutes(
+        network.db,
+        network.tokens,
+        network.summaryCache,
+        network.defaultToken,
+        network.events,
+      ),
+    );
   }
-  router.use(buildRoutes(defaultNetwork.db, defaultNetwork.summaryCache, defaultNetwork.defaultToken));
+  router.use(
+    buildRoutes(
+      defaultNetwork.db,
+      defaultNetwork.tokens,
+      defaultNetwork.summaryCache,
+      defaultNetwork.defaultToken,
+      defaultNetwork.events,
+    ),
+  );
   return router;
 }
 
 /**
  * One router per resource: `plans.ts`, `mandates.ts`, `merchants.ts`,
- * `subscribers.ts` and `stats.ts`, with shared query helpers in
+ * `subscribers.ts`, `stats.ts` and `tokens.ts`, with shared query helpers in
  * `helpers.ts` and response shapes in `types.ts`. This file only composes
  * them, so route ownership is obvious from a path prefix and two features
  * rarely touch the same file.
@@ -48,18 +74,32 @@ export function buildApiRouter(networks: NetworkRoutes[]): Router {
  * The response types are the backend's single source of truth for the API:
  * handlers annotate their bodies with them and the typed client
  * (`src/client/index.ts`) re-exports them, so types are shared, not copied.
+ *
+ * `tokens` resolves a token contract id to its symbol/decimals (see
+ * `lib/tokens.ts`); the plan and mandate routers join those fields onto their
+ * amounts and `tokensRouter` serves them directly.
  */
 export function buildRoutes(
   db: DatabaseSync,
+  tokens: TokenMetadataService,
   summaryCache: MerchantSummaryCache = defaultMerchantSummaryCache,
   defaultToken?: string,
+  events?: EventEmitter,
 ): Router {
   const r = Router();
-  r.use(plansRouter(db));
-  r.use(mandatesRouter(db));
+  r.use((_req, res, next) => {
+    res.setHeader("Cache-Control", "public, max-age=5");
+    next();
+  });
+  r.use(plansRouter(db, tokens));
+  r.use(protocolRouter(db));
+  r.use(mandatesRouter(db, tokens));
   r.use(merchantsRouter(db, summaryCache, defaultToken));
   r.use(subscribersRouter(db));
   r.use(statsRouter(db));
+  r.use(tokensRouter(tokens));
+  if (events) r.use(streamRouter(events, db));
+  r.use(vaultRouter(db));
   return r;
 }
 

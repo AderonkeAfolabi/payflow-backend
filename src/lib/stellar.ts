@@ -12,9 +12,12 @@ export type RpcLike = Pick<
   | "getHealth"
   | "getEvents"
   | "getAccount"
+  | "getFeeStats"
   | "prepareTransaction"
   | "sendTransaction"
   | "getTransaction"
+  /** Read-only contract calls; token metadata (symbol/name/decimals) uses them. */
+  | "simulateTransaction"
 >;
 
 /** Where failover currently stands; reported by /health. */
@@ -148,6 +151,10 @@ export class FailoverRpc implements RpcStatus {
     return this.run("getAccount", (server) => server.getAccount(address));
   }
 
+  async getFeeStats(): Promise<rpc.Api.GetFeeStatsResponse> {
+    return this.run("getFeeStats", (server) => server.getFeeStats());
+  }
+
   async prepareTransaction(
     tx: Transaction | FeeBumpTransaction,
     useUpgradedAuth?: boolean,
@@ -165,6 +172,17 @@ export class FailoverRpc implements RpcStatus {
 
   async getTransaction(hash: string): Promise<rpc.Api.GetTransactionResponse> {
     return this.run("getTransaction", (server) => server.getTransaction(hash));
+  }
+
+  /**
+   * Simulations are read-only, so they are failed over exactly like the other
+   * calls: one dead provider must not make a token's metadata unreadable,
+   * which is what `lib/tokens.ts` reads symbol/name/decimals through.
+   */
+  async simulateTransaction(
+    tx: Transaction | FeeBumpTransaction,
+  ): Promise<rpc.Api.SimulateTransactionResponse> {
+    return this.run("simulateTransaction", (server) => server.simulateTransaction(tx));
   }
 }
 
@@ -194,6 +212,34 @@ export interface DecodedEvent {
   topics: unknown[];
   /** Non-topic fields. The macro emits these as a map by default. */
   data: Record<string, unknown>;
+  /**
+   * Close time of the ledger the event was emitted in, as unix seconds.
+   *
+   * This is the chain's own clock, not the indexer's wall clock, so a metric
+   * bucketed by it (see `lib/churn.ts`) is the same whether the event was
+   * indexed live or on a replay. `null` when the RPC did not report one.
+   *
+   * Optional so a hand-built event in a test need not name a time; the
+   * decoder always sets it.
+   */
+  closeTime?: number | null;
+}
+
+/** Helper to parse a ledger close time into unix epoch seconds. */
+export function parseCloseTime(raw: unknown): number | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === "number") {
+    return raw > 1e11 ? Math.floor(raw / 1000) : raw;
+  }
+  if (typeof raw === "string") {
+    const asNum = Number(raw);
+    if (!Number.isNaN(asNum) && asNum > 0) {
+      return asNum > 1e11 ? Math.floor(asNum / 1000) : asNum;
+    }
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed)) return Math.floor(parsed / 1000);
+  }
+  return null;
 }
 
 /** Field types used by `event_spec.json`, mirroring the Soroban spec. */
@@ -348,6 +394,9 @@ export function decodeEvent(raw: rpc.Api.EventResponse): DecodedEvent | null {
       txHash: raw.txHash,
       topics: rest,
       data,
+      // The ledger's close time, so downstream projections can bucket events
+      // by the chain's clock rather than by when the indexer happened to run.
+      closeTime: parseCloseTime((raw as { ledgerClosedAt?: unknown }).ledgerClosedAt),
     };
   } catch {
     return null;

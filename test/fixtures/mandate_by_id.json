@@ -12,5 +12,7 @@
   "fee_bps": 0,
   "status": "Active",
   "ended_by": null,
-  "ledger": 1
+  "ledger": 1,
+  "tokenSymbol": null,
+  "decimals": null
 }

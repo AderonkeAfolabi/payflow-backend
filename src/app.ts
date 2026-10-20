@@ -1,16 +1,22 @@
 import { randomUUID } from "node:crypto";
+import type { EventEmitter } from "node:events";
 import cors from "cors";
+import { rateLimit } from "express-rate-limit";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import helmet from "helmet";
 import { pinoHttp } from "pino-http";
 import type { DatabaseSync } from "node:sqlite";
 import type { Config, NetworkConfig } from "./config.ts";
 import type { IndexerStatus } from "./indexer.ts";
 import { buildAdminRoutes, type AdminHooks } from "./routes/admin.ts";
 import { buildApiRouter, MerchantSummaryCache } from "./routes/index.ts";
+import { buildOpenApiDocument } from "./routes/openapi.ts";
+import { asReader, TokenMetadataService } from "./lib/tokens.ts";
 import { sendApiError } from "./routes/errors.ts";
 import type { HealthResponse } from "./routes/types.ts";
 import type { RpcStatus } from "./lib/stellar.ts";
 import { logger } from "./lib/logger.ts";
+import { metrics, publishIndexerMetrics } from "./lib/metrics.ts";
 import { withSpan } from "./lib/telemetry.ts";
 
 /**
@@ -86,9 +92,13 @@ function lagOf(indexer: IndexerStatus | undefined): number | null {
 export interface NetworkRuntime {
   config: NetworkConfig;
   db: DatabaseSync;
+  events?: EventEmitter | undefined;
   indexer?: IndexerStatus | undefined;
   summaryCache?: MerchantSummaryCache | undefined;
   rpc?: RpcStatus | undefined;
+  /** Token metadata source; without one the network's native asset still
+   * resolves and every other token reports unavailable (never the network). */
+  tokens?: TokenMetadataService | undefined;
 }
 
 function healthOf(runtime: NetworkRuntime): HealthResponse {
@@ -114,6 +124,8 @@ function healthOf(runtime: NetworkRuntime): HealthResponse {
           lastRunAt: indexer.lastRunAt ? new Date(indexer.lastRunAt).toISOString() : null,
           lastError: indexer.lastError,
           mismatchedEvents: indexer.mismatchedEvents ?? 0,
+          reconciliations: indexer.reconciliations ?? 0,
+          corrections: indexer.corrections ?? 0,
         }
       : null,
     rpc: rpc && "active" in rpc && Array.isArray(rpc.endpoints) ? { active: rpc.active, endpoints: rpc.endpoints } : null,
@@ -134,25 +146,26 @@ export function createApp(
   db: DatabaseSync,
   config: Config,
   indexer?: IndexerStatus,
-  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks,
-  arg4?: RpcStatus | AdminHooks,
-  arg5?: AdminHooks,
+  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks | TokenMetadataService,
+  arg4?: RpcStatus | AdminHooks | TokenMetadataService,
+  arg5?: AdminHooks | TokenMetadataService,
 ): Express;
 export function createApp(
   dbOrRuntimes: DatabaseSync | NetworkRuntime[],
   config: Config,
   arg2?: IndexerStatus | AdminHooks,
-  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks,
-  arg4?: RpcStatus | AdminHooks,
-  arg5?: AdminHooks,
+  arg3?: MerchantSummaryCache | RpcStatus | AdminHooks | TokenMetadataService,
+  arg4?: RpcStatus | AdminHooks | TokenMetadataService,
+  arg5?: AdminHooks | TokenMetadataService,
 ): Express {
   let runtimes: NetworkRuntime[];
   let admin: AdminHooks | undefined;
+  let tokens: TokenMetadataService | undefined;
   const isMulti = Array.isArray(dbOrRuntimes);
 
   if (isMulti) {
     runtimes = dbOrRuntimes;
-    if (typeof arg2 === "object" && arg2 !== null && ("reindex" in arg2 || "keeperPass" in arg2)) {
+    if (typeof arg2 === "object" && arg2 !== null && ("reindex" in arg2 || "keeperPass" in arg2 || "keeperHistory" in arg2)) {
       admin = arg2 as AdminHooks;
     }
   } else {
@@ -161,10 +174,14 @@ export function createApp(
     let merchantCache: MerchantSummaryCache | undefined;
     let rpc: RpcStatus | undefined;
 
+    // The collaborators are optional and positional, so each one is
+    // identified by its type instead of by the slot it was passed in.
     for (const arg of [arg3, arg4, arg5]) {
       if (!arg) continue;
       if (arg instanceof MerchantSummaryCache) {
         merchantCache = arg;
+      } else if (arg instanceof TokenMetadataService) {
+        tokens = arg;
       } else if ("active" in arg && Array.isArray((arg as RpcStatus).endpoints)) {
         rpc = arg as RpcStatus;
       } else if (typeof arg === "object") {
@@ -189,6 +206,7 @@ export function createApp(
         indexer,
         summaryCache: merchantCache,
         rpc,
+        tokens,
       },
     ];
   }
@@ -199,6 +217,9 @@ export function createApp(
   }
 
   const app = express();
+
+  app.set("trust proxy", 1);
+  app.use(helmet());
 
   app.use(
     pinoHttp({
@@ -228,6 +249,52 @@ export function createApp(
     }),
   );
   app.use(express.json({ limit: "64kb" }));
+
+  app.get(["/health", "/ready"], (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+
+  app.use(
+    "/api",
+    (_req, res, next) => {
+      res.setHeader("Cache-Control", "no-store");
+      next();
+    },
+    rateLimit({
+      windowMs: config.API_RATE_LIMIT_WINDOW_MS ?? 60_000,
+      limit: config.API_RATE_LIMIT_MAX ?? 120,
+      standardHeaders: "draft-8",
+      legacyHeaders: false,
+      handler: (req, res) => sendApiError(res, req, 429, "rate_limited"),
+    }),
+  );
+
+  // The API's own description: an OpenAPI 3.1 document covering every route
+  // this instance serves. It is built once and cached, so a scrape costs
+  // nothing beyond the JSON response.
+  const openApiDocument = buildOpenApiDocument({
+    networks: runtimes.map((rt) => rt.config.name),
+  });
+  app.get("/api/openapi.json", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.json(openApiDocument);
+  });
+
+  // Prometheus metrics. Opt-in: without METRICS_ENABLED the path does not
+  // exist and answers 404 like any other unknown route.
+  if (config.METRICS_ENABLED) {
+    app.get("/metrics", (_req, res) => {
+      // The gauges describe the projection as it stands, not as it stood
+      // after the last pass, so they are refreshed before the render.
+      for (const rt of runtimes) {
+        if (rt.indexer) publishIndexerMetrics(rt.indexer, rt.config.name);
+      }
+      res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.send(metrics.render());
+    });
+  }
 
   // Always 200 so a slow backfill does not get the service restarted; the
   // body says whether the projection is current.
@@ -266,14 +333,32 @@ export function createApp(
     app.use("/admin", buildAdminRoutes(config.ADMIN_TOKEN, admin));
   }
 
+  if (config.KEEPER_ENABLED && admin?.keeperHistory) {
+    app.get("/api/keeper", (_req, res) => {
+      res.json({ passes: admin.keeperHistory?.() ?? [] });
+    });
+  }
+
+  // A network without a wired token metadata source falls back to a reader
+  // that reports every non-native token as unavailable, so a service started
+  // without an RPC url never reaches the network from a request handler.
+  // Native XLM still resolves from the passphrase alone.
+  const tokenServiceOf = (rt: NetworkRuntime): TokenMetadataService =>
+    rt.tokens ??
+    new TokenMetadataService(asReader(undefined), {
+      networkPassphrase: rt.config.networkPassphrase,
+    });
+
   app.use(
     "/api",
     buildApiRouter(
       runtimes.map((rt) => ({
         name: rt.config.name,
         db: rt.db,
+        events: rt.events,
         summaryCache: rt.summaryCache,
         defaultToken: rt.config.defaultToken ?? config.TOKEN_ID,
+        tokens: tokenServiceOf(rt),
       })),
     ),
   );
