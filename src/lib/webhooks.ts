@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { EventEmitter } from "node:events";
 import { big, num, str } from "./stellar.ts";
 import type { DecodedEvent } from "./stellar.ts";
-import type { WebhookRegistration } from "../routes/types.ts";
+import type { WebhookRegistration, WebhookSummary } from "../routes/types.ts";
 import { logger } from "./logger.ts";
 
 /** Most delivery attempts before a webhook is marked failed. */
@@ -136,6 +136,63 @@ export class WebhookDispatcher {
           ORDER BY id DESC`,
       )
       .all(merchant) as unknown as Webhook[];
+  }
+
+  /**
+   * A merchant's registered (not deleted) webhooks for the API, newest
+   * first. Includes webhooks that gave up after failed deliveries, so the
+   * merchant can see and remove them. The secret is reduced to its last
+   * four characters and never leaves this method whole.
+   */
+  listForMerchant(merchant: string): WebhookSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, url, secret, failed, failures, last_attempt, last_status, created_at
+           FROM webhooks
+          WHERE merchant = ? AND active = 1
+          ORDER BY id DESC`,
+      )
+      .all(merchant) as unknown as Array<{
+      id: number;
+      url: string;
+      secret: string;
+      failed: number;
+      failures: number;
+      last_attempt: number | null;
+      last_status: number | null;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      merchant,
+      url: row.url,
+      secretLast4: row.secret.slice(-4),
+      failed: row.failed === 1,
+      failures: row.failures,
+      lastAttempt: row.last_attempt,
+      lastStatus: row.last_status,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Delete a merchant's webhook: it is deactivated, so it receives no new
+   * events, and its pending deliveries are dropped, so scheduled retries
+   * stop too. The row stays for the delivery history. Returns false when
+   * no active webhook with that id belongs to the merchant.
+   */
+  deactivate(merchant: string, id: number): boolean {
+    const info = this.db
+      .prepare("UPDATE webhooks SET active = 0 WHERE id = ? AND merchant = ? AND active = 1")
+      .run(id, merchant);
+    if (Number(info.changes) === 0) return false;
+    this.db
+      .prepare(
+        `UPDATE webhook_deliveries SET status = 'failed', error = 'webhook deleted'
+          WHERE webhook_id = ? AND status = 'pending'`,
+      )
+      .run(id);
+    return true;
   }
 
   /** Deliveries due for retry right now, oldest retry first. */

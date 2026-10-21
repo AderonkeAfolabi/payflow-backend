@@ -475,6 +475,87 @@ function apiPaths(root: string): Record<string, PathItemObject> {
           "429": errorResponse('The per-IP rate limit was reached (error.code = "rate_limited").'),
         },
       },
+      get: {
+        tags: ["webhooks"],
+        summary: "List a merchant's webhooks",
+        description:
+          "The merchant's registered webhooks, newest first, including ones that gave up after failed deliveries. Secrets are never returned, only their last four characters. The caller proves control of the merchant address with an ed25519 signature over `payflow-webhook-list:v1:<merchant>:<timestamp>`.",
+        operationId: `listWebhooks${operationSuffix(root)}`,
+        parameters: [
+          {
+            name: "merchant",
+            in: "query",
+            required: true,
+            description: ADDRESS_DESCRIPTION,
+            schema: { type: "string" },
+          },
+          {
+            name: "timestamp",
+            in: "query",
+            required: true,
+            description: "Unix seconds. Signatures older than ten minutes are refused.",
+            schema: { type: "integer", minimum: 0 },
+          },
+          {
+            name: "signature",
+            in: "query",
+            required: true,
+            description: "Base64-encoded ed25519 signature of `payflow-webhook-list:v1:<merchant>:<timestamp>`.",
+            schema: { type: "string" },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "The merchant's webhooks.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    merchant: { type: "string", description: ADDRESS_DESCRIPTION },
+                    webhooks: { type: "array", items: { $ref: "#/components/schemas/WebhookSummary" } },
+                  },
+                  required: ["merchant", "webhooks"],
+                },
+              },
+            },
+          },
+          "400": invalidRequest(),
+          "401": errorResponse('The signature is wrong, malformed or older than ten minutes (error.code = "unauthorized").'),
+        },
+      },
+    },
+    [p("/webhooks/{id}")]: {
+      delete: {
+        tags: ["webhooks"],
+        summary: "Delete a webhook",
+        description:
+          "Removes one of the merchant's webhooks: it receives no further deliveries, and retries already scheduled are dropped. The caller proves control of the merchant address with an ed25519 signature over `payflow-webhook-delete:v1:<merchant>:<id>:<timestamp>`, sent as a JSON body or, for clients that cannot send a DELETE body, as `merchant`, `timestamp` and `signature` query parameters.",
+        operationId: `deleteWebhook${operationSuffix(root)}`,
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "The webhook id returned at registration.",
+            schema: { type: "integer", minimum: 1 },
+          },
+        ],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/WebhookDeleteRequest" },
+            },
+          },
+        },
+        responses: {
+          "204": { description: "The webhook was deleted." },
+          "400": invalidRequest(),
+          "401": errorResponse('The signature is wrong, malformed or older than ten minutes (error.code = "unauthorized").'),
+          "404": errorResponse('No active webhook with that id belongs to the merchant (error.code = "not_found").'),
+        },
+      },
     },
     [p("/due")]: {
       get: {
@@ -1415,6 +1496,39 @@ function componentSchemas(): Record<string, SchemaObject> {
         active: { type: "boolean", description: "Whether deliveries are currently enabled." },
       },
       required: ["id", "merchant", "url", "secret", "active"],
+    },
+    WebhookSummary: {
+      type: "object",
+      properties: {
+        id: { type: "integer" },
+        merchant: { type: "string", description: ADDRESS_DESCRIPTION },
+        url: { type: "string", format: "uri" },
+        secretLast4: {
+          type: "string",
+          description: "The signing secret's last four characters; the secret itself is never returned again.",
+        },
+        failed: { type: "boolean", description: "Deliveries gave up after repeated failures." },
+        failures: { type: "integer" },
+        lastAttempt: { type: ["integer", "null"], description: "Unix seconds of the last failed attempt." },
+        lastStatus: { type: ["integer", "null"], description: "HTTP status of the last failed attempt." },
+        createdAt: { type: "integer", description: "Unix seconds." },
+      },
+      required: ["id", "merchant", "url", "secretLast4", "failed", "failures", "lastAttempt", "lastStatus", "createdAt"],
+    },
+    WebhookDeleteRequest: {
+      type: "object",
+      properties: {
+        merchant: { type: "string", description: ADDRESS_DESCRIPTION },
+        signature: {
+          type: "string",
+          description: "Base64-encoded ed25519 signature of `payflow-webhook-delete:v1:<merchant>:<id>:<timestamp>`.",
+        },
+        timestamp: {
+          type: "integer",
+          description: "Unix seconds. Signatures older than ten minutes are refused.",
+        },
+      },
+      required: ["merchant", "signature", "timestamp"],
     },
     UpcomingCharges: {
       type: "object",

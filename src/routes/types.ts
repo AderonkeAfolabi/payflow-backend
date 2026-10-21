@@ -370,6 +370,28 @@ export interface WebhookRegistration {
   active: boolean;
 }
 
+/** A registered webhook as `GET /api/webhooks` lists it: never the secret. */
+export interface WebhookSummary {
+  id: number;
+  merchant: string;
+  url: string;
+  /** The signing secret's last four characters, to tell secrets apart. */
+  secretLast4: string;
+  /** True once deliveries gave up after repeated failures. */
+  failed: boolean;
+  failures: number;
+  /** Unix seconds of the last failed delivery attempt, if any. */
+  lastAttempt: number | null;
+  lastStatus: number | null;
+  /** Unix seconds. */
+  createdAt: number;
+}
+
+export interface WebhookListResponse {
+  merchant: string;
+  webhooks: WebhookSummary[];
+}
+
 export interface StatsResponse {
   plans: number;
   mandates: number;
