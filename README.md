@@ -276,6 +276,24 @@ matches the chain. A failed RPC read is logged and retried on the next pass;
 it never crashes the loop. Corrections are logged and reported on `/health`
 under `indexer.reconciliations` and `indexer.corrections`.
 
+### Rebuilding the projection from scratch
+
+When the database is corrupted, stop the server and run:
+
+```bash
+npm run reindex
+```
+
+For every configured network it moves the SQLite file (with its `-wal` and
+`-shm` files) aside to `<DATABASE_PATH>.bak-<UTC timestamp>`, creates a fresh
+database and catches up from `INDEXER_START_LEDGER`. The old file is never
+deleted; remove the backup yourself once the new projection checks out.
+
+The running server holds `<DATABASE_PATH>.lock` (its PID), and `reindex`
+refuses to run while that process is alive, so it cannot move a database out
+from under a live server. A lock left by a crashed process is detected by its
+dead PID and taken over.
+
 ### Rotating the keeper key without downtime
 
 `charge` is permissionless, so the keeper key is only a fee payer â€” but losing
@@ -600,6 +618,18 @@ failed and stops receiving deliveries until re-registered. Undelivered
 deliveries are retried on a short cadence, so a silent indexer still makes
 delivery progress.
 
+`GET /api/webhooks?merchant=<G...>&timestamp=<unix s>&signature=<base64>`
+lists the merchant's webhooks, newest first, signed over
+`payflow-webhook-list:v1:<merchant>:<timestamp>`. Secrets are never returned
+again: each entry shows only `secretLast4`. `DELETE /api/webhooks/:id` removes
+one, with `{ merchant, timestamp, signature }` as a JSON body (or the same
+three query parameters) signed over
+`payflow-webhook-delete:v1:<merchant>:<id>:<timestamp>`; a deleted webhook gets
+no further deliveries and its scheduled retries are dropped. Each action has
+its own message prefix, so a signature for one cannot be replayed as another.
+A wrong, malformed or expired (older than ten minutes) signature is a `401
+unauthorized`.
+
 | `error.code` | HTTP | Where |
 |---|---|---|
 | `not_found` | 404 | An unknown path, or a method/path the API does not expose |
@@ -612,7 +642,7 @@ delivery progress.
 | `token_metadata_unavailable` | 502 | `GET /api/tokens/:id` while the token contract cannot be read |
 | `rate_limited` | 429 | API request exceeded the configured per-IP limit; includes `Retry-After` |
 | `stream_limit` | 503 | `GET /api/stream` when the concurrent stream cap is reached |
-| `unauthorized` | 401 | A `/admin/*` request without a valid bearer token |
+| `unauthorized` | 401 | A `/admin/*` request without a valid bearer token, or a webhook list/delete with a wrong or expired signature |
 | `reindex_unavailable` | 503 | `POST /admin/reindex` on a process without an indexer |
 | `indexer_unavailable` | 503 | `/admin/indexer/pause`/`resume` on a process without an indexer |
 | `keeper_unavailable` | 503 | A keeper endpoint while `KEEPER_ENABLED=false` |
@@ -767,6 +797,7 @@ examined without API downtime.
 | `KEEPER_CHANNEL_SECRETS` | *(empty)* | Extra `S...` channel keys, comma-separated: each settles in parallel with its own sequence and fees; see [Settling in parallel with channel accounts](#settling-in-parallel-with-channel-accounts) |
 | `KEEPER_INTERVAL_MS` | `60000` | Settlement poll interval |
 | `KEEPER_ORDER` | `oldest` | Order for due mandates: `oldest` (due date ascending) or `largest` (amount descending) |
+| `KEEPER_MERCHANTS` | *(empty)* | Only settle mandates payable to these merchants, comma-separated `G...` addresses. Empty settles every merchant |
 | `KEEPER_FEE_PERCENTILE` | `90` | Soroban inclusion-fee percentile used for charge transactions (`50`, `60`, `70`, `80`, `90`, `95`, or `99`) |
 | `KEEPER_MAX_FEE` | `100000` | Maximum inclusion fee in stroops; congestion retries cannot exceed this cap |
 | `KEEPER_BATCH` | `true` | Use `charge_many` when supported, falling back to single charges when unavailable |

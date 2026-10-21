@@ -91,6 +91,21 @@ const schema = z.object({
    * high-value mandates under a fee budget).
    */
   KEEPER_ORDER: z.enum(["oldest", "largest"]).default("oldest"),
+  /**
+   * Only settle mandates payable to these merchants, comma-separated
+   * `G...` addresses. Empty (the default) settles every merchant's mandates,
+   * so an operator running a keeper for their own business can stop paying
+   * fees for everyone else's.
+   */
+  KEEPER_MERCHANTS: z
+    .string()
+    .default("")
+    .transform((raw) => [...new Set(raw.split(",").map((part) => part.trim()).filter(Boolean))])
+    .pipe(
+      z.array(
+        z.string().refine(StrKey.isValidEd25519PublicKey, "must be a valid Stellar account address"),
+      ),
+    ),
   KEEPER_FEE_PERCENTILE: z.enum(["50", "60", "70", "80", "90", "95", "99"]).default("90"),
   KEEPER_MAX_FEE: z.coerce
     .bigint()

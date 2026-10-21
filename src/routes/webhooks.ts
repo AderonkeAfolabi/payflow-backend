@@ -1,8 +1,9 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { Keypair } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import type { DatabaseSync } from "node:sqlite";
 import { WebhookDispatcher } from "../lib/webhooks.ts";
+import type { WebhookListResponse } from "./types.ts";
 import { sendApiError } from "./errors.ts";
 import { addressSchema, validate } from "./validate.ts";
 
@@ -12,8 +13,22 @@ import { addressSchema, validate } from "./validate.ts";
  *  signature. Only public keys are touched; the secret never reaches the
  *  API. */
 const SIGNED_MESSAGE_PREFIX = "payflow-webhook:v1";
+/** Listing signs `payflow-webhook-list:v1:<merchant>:<timestamp>`; a
+ *  distinct prefix, so a captured registration or deletion signature can
+ *  never be replayed as a listing, or the other way round. */
+const LIST_MESSAGE_PREFIX = "payflow-webhook-list:v1";
+/** Deletion signs `payflow-webhook-delete:v1:<merchant>:<id>:<timestamp>`. */
+const DELETE_MESSAGE_PREFIX = "payflow-webhook-delete:v1";
 /** Registration signatures older than this are refused (replay window). */
 const SIGNATURE_TOLERANCE_S = 10 * 60;
+
+/** Unix seconds; accepts a string or a JSON number so callers may send
+ *  either representation. */
+const timestampSchema = z
+  .coerce.string()
+  .regex(/^\d+$/, "must be a unix timestamp in seconds")
+  .transform(Number)
+  .refine((value) => Number.isSafeInteger(value), "must be a unix timestamp in seconds");
 
 const registerSchema = z.object({
   merchant: addressSchema,
@@ -34,16 +49,79 @@ const registerSchema = z.object({
   secret: z.string().min(1).max(1_000).optional(),
   /** Base64-encoded ed25519 signature of the signed message. */
   signature: z.string().min(1),
-  /** Unix seconds; replay window of ten minutes. Accepts a string or a JSON
-   *  number so callers may send either representation. */
-  timestamp: z
-    .coerce.string()
-    .regex(/^\d+$/, "must be a unix timestamp in seconds")
-    .transform(Number)
-    .refine((value) => Number.isSafeInteger(value), "must be a unix timestamp in seconds"),
+  /** Replay window of ten minutes. */
+  timestamp: timestampSchema,
 });
 
-/** `POST /api/webhooks`: register a URL to receive signed charge events. */
+/** The proof a merchant sends to list or delete its webhooks. */
+const proofSchema = z.object({
+  merchant: addressSchema,
+  signature: z.string().min(1),
+  timestamp: timestampSchema,
+});
+
+const idSchema = z.coerce.number().int().positive();
+
+/** Whether `timestamp` is inside the replay window around the server's clock. */
+function fresh(timestamp: number): boolean {
+  return Math.abs(Math.floor(Date.now() / 1000) - timestamp) <= SIGNATURE_TOLERANCE_S;
+}
+
+/** The decoded 64-byte ed25519 signature, or null when it is not one. */
+function signatureBytesOf(signature: string): Buffer | null {
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(signature, "base64");
+  } catch {
+    return null;
+  }
+  return bytes.length === 64 ? bytes : null;
+}
+
+/** Whether `signature` is the merchant's ed25519 signature over `message`. */
+function verifies(merchant: string, message: string, signature: Buffer): boolean {
+  try {
+    return Keypair.fromPublicKey(merchant).verify(Buffer.from(message, "utf8"), signature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check a list/delete proof. A wrong, malformed or expired signature is a
+ * `401 unauthorized`: the request is well-formed but does not prove
+ * control of the merchant address right now. Sends the error and returns
+ * false when the proof fails.
+ */
+function authorized(
+  req: Request,
+  res: Response,
+  merchant: string,
+  message: string,
+  signature: string,
+  timestamp: number,
+): boolean {
+  if (!fresh(timestamp)) {
+    sendApiError(res, req, 401, "unauthorized", "The signature has expired; sign a fresh timestamp.", [
+      { path: "timestamp", message: "must be within ten minutes of the server's clock" },
+    ]);
+    return false;
+  }
+  const bytes = signatureBytesOf(signature);
+  if (bytes === null || !verifies(merchant, message, bytes)) {
+    sendApiError(res, req, 401, "unauthorized", "The signature does not prove control of the merchant address.", [
+      { path: "signature", message: "signature does not prove control of the merchant address" },
+    ]);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * `POST /api/webhooks`: register a URL to receive signed charge events.
+ * `GET /api/webhooks?merchant=`: list a merchant's webhooks.
+ * `DELETE /api/webhooks/:id`: remove one of them.
+ */
 export function webhooksRouter(db: DatabaseSync, dispatcher: WebhookDispatcher): Router {
   const r = Router();
 
@@ -52,8 +130,7 @@ export function webhooksRouter(db: DatabaseSync, dispatcher: WebhookDispatcher):
     if (!parsed.ok) return;
     const { merchant, url, secret, signature, timestamp } = parsed.value;
 
-    const now = Math.floor(Date.now() / 1000);
-    if (Math.abs(now - timestamp) > SIGNATURE_TOLERANCE_S) {
+    if (!fresh(timestamp)) {
       sendApiError(res, req, 400, "invalid_request", undefined, [
         { path: "timestamp", message: "must be within ten minutes of the server's clock" },
       ]);
@@ -61,32 +138,14 @@ export function webhooksRouter(db: DatabaseSync, dispatcher: WebhookDispatcher):
     }
 
     const message = `${SIGNED_MESSAGE_PREFIX}:${merchant}:${url}:${timestamp}`;
-    let signatureBytes: Buffer;
-    try {
-      signatureBytes = Buffer.from(signature, "base64");
-    } catch {
+    const signatureBytes = signatureBytesOf(signature);
+    if (signatureBytes === null) {
       sendApiError(res, req, 400, "invalid_request", undefined, [
-        { path: "signature", message: "must be base64-encoded" },
+        { path: "signature", message: "must be a base64-encoded 64-byte ed25519 signature" },
       ]);
       return;
     }
-    if (signatureBytes.length !== 64) {
-      sendApiError(res, req, 400, "invalid_request", undefined, [
-        { path: "signature", message: "must be a 64-byte ed25519 signature" },
-      ]);
-      return;
-    }
-
-    const valid =
-      signatureBytes.length === 64 &&
-      (() => {
-        try {
-          return Keypair.fromPublicKey(merchant).verify(Buffer.from(message, "utf8"), signatureBytes);
-        } catch {
-          return false;
-        }
-      })();
-    if (!valid) {
+    if (!verifies(merchant, message, signatureBytes)) {
       sendApiError(res, req, 400, "invalid_request", undefined, [
         { path: "signature", message: "signature does not prove control of the merchant address" },
       ]);
@@ -95,6 +154,55 @@ export function webhooksRouter(db: DatabaseSync, dispatcher: WebhookDispatcher):
 
     const registration = dispatcher.register(merchant, url, secret);
     res.json({ ...registration, active: true });
+  });
+
+  /**
+   * The merchant's webhooks, newest first, including ones that gave up
+   * after failed deliveries (`failed: true`). Secrets are never returned:
+   * only their last four characters, so a merchant can tell them apart.
+   * The proof travels in the query string: `merchant`, `timestamp` and
+   * `signature` over `payflow-webhook-list:v1:<merchant>:<timestamp>`.
+   */
+  r.get("/webhooks", (req, res) => {
+    const parsed = validate(req, res, "query", proofSchema, req.query);
+    if (!parsed.ok) return;
+    const { merchant, signature, timestamp } = parsed.value;
+    const message = `${LIST_MESSAGE_PREFIX}:${merchant}:${timestamp}`;
+    if (!authorized(req, res, merchant, message, signature, timestamp)) return;
+
+    const body: WebhookListResponse = {
+      merchant,
+      webhooks: dispatcher.listForMerchant(merchant),
+    };
+    res.setHeader("Cache-Control", "no-store");
+    res.json(body);
+  });
+
+  /**
+   * Delete one of the merchant's webhooks: it receives no further
+   * deliveries, including retries already scheduled. The proof is sent as
+   * a JSON body (or, for clients that cannot send a DELETE body, the query
+   * string): `merchant`, `timestamp` and `signature` over
+   * `payflow-webhook-delete:v1:<merchant>:<id>:<timestamp>`. A webhook
+   * that does not exist, is already deleted or belongs to another merchant
+   * is a 404, so the endpoint does not reveal other merchants' ids.
+   */
+  r.delete("/webhooks/:id", (req, res) => {
+    const id = validate(req, res, "id", idSchema, req.params.id);
+    if (!id.ok) return;
+    const hasBody =
+      typeof req.body === "object" && req.body !== null && Object.keys(req.body as object).length > 0;
+    const parsed = validate(req, res, hasBody ? "body" : "query", proofSchema, hasBody ? req.body : req.query);
+    if (!parsed.ok) return;
+    const { merchant, signature, timestamp } = parsed.value;
+    const message = `${DELETE_MESSAGE_PREFIX}:${merchant}:${id.value}:${timestamp}`;
+    if (!authorized(req, res, merchant, message, signature, timestamp)) return;
+
+    if (!dispatcher.deactivate(merchant, id.value)) {
+      sendApiError(res, req, 404, "not_found", "No webhook with that id is registered for this merchant.");
+      return;
+    }
+    res.status(204).end();
   });
 
   return r;
