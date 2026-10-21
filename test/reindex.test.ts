@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +15,18 @@ const CONTRACT = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 
 const dir = mkdtempSync(join(tmpdir(), "payflow-reindex-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
+
+/** A PID with no process behind it: probe downward until one is free. */
+function deadPid(): number {
+  for (let pid = 99_999; pid > 1; pid -= 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") return pid;
+    }
+  }
+  throw new Error("no free pid found");
+}
 
 let n = 0;
 function dbPath(): string {
@@ -77,13 +88,9 @@ describe("database lock", () => {
     assert.equal(lockHolder(path), null);
   });
 
-  test("a lock left by a dead process is stale and taken over", async () => {
+  test("a lock left by a dead process is stale and taken over", () => {
     const path = dbPath();
-    // Spawn and wait for a process to exit, so its PID is known to be dead.
-    const child = spawn(process.execPath, ["-e", ""]);
-    const pid = child.pid!;
-    await new Promise((resolve) => child.on("exit", resolve));
-    writeFileSync(lockPathFor(path), `${pid}\n`);
+    writeFileSync(lockPathFor(path), `${deadPid()}\n`);
     assert.equal(lockHolder(path), null);
     const release = acquireLock(path);
     assert.equal(lockHolder(path), process.pid);
@@ -141,24 +148,21 @@ describe("reindex", () => {
   test("refuses to run while the server holds the database", async () => {
     const path = dbPath();
     openDatabase(path).close();
-    // Hold the lock from another live process, as the server would.
-    const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
-    try {
-      writeFileSync(lockPathFor(path), `${holder.pid}\n`);
-      await assert.rejects(reindex(net(path), fakeRpc([], 200)), (err: unknown) => {
-        assert.ok(err instanceof DatabaseLockedError);
-        assert.equal(err.pid, holder.pid);
-        return true;
-      });
-      assert.ok(existsSync(path), "the database is left in place");
-      assert.equal(
-        readdirSync(dir).some((f) => f.startsWith(`payflow-${n}.db.bak-`)),
-        false,
-        "no backup is made",
-      );
-    } finally {
-      holder.kill();
-    }
+    // Another live process holds the lock, as the server would: the test
+    // runner that started this process is alive for the whole test.
+    const holder = process.ppid;
+    writeFileSync(lockPathFor(path), `${holder}\n`);
+    await assert.rejects(reindex(net(path), fakeRpc([], 200)), (err: unknown) => {
+      assert.ok(err instanceof DatabaseLockedError);
+      assert.equal(err.pid, holder);
+      return true;
+    });
+    assert.ok(existsSync(path), "the database is left in place");
+    assert.equal(
+      readdirSync(dir).some((f) => f.startsWith(`payflow-${n}.db.bak-`)),
+      false,
+      "no backup is made",
+    );
   });
 
   test("works when there is no database yet", async () => {
