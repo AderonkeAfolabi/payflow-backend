@@ -1,5 +1,6 @@
 import { loadConfig, networkConfigs } from "./config.ts";
 import { openDatabase } from "./lib/db.ts";
+import { acquireLock } from "./lib/lock.ts";
 import { HttpArchive, makeRpc } from "./lib/stellar.ts";
 import { makeSimulationReader, TokenMetadataService } from "./lib/tokens.ts";
 import { WebhookDispatcher } from "./lib/webhooks.ts";
@@ -19,6 +20,9 @@ const networks = networkConfigs(config);
 // One indexer and one database per network, so cursors and projections never
 // mix. `runtimes[0]` is the default network: it serves the unprefixed routes.
 const runtimes = networks.map((network) => {
+  // Mark the database as in use so `npm run reindex` refuses to move it away
+  // underneath us; a second server on the same file fails here too.
+  const releaseLock = acquireLock(network.databasePath);
   const db = openDatabase(network.databasePath);
   const server = makeRpc(network);
   // A full-history archive backfills the gap between the stored cursor and
@@ -61,9 +65,14 @@ const runtimes = networks.map((network) => {
     // serves the corrected projection instead of a stale cache entry.
     (merchant) => indexer.merchantCache.invalidate(merchant),
   );
-  return { network, db, server, indexer, runPass, tokens, reconciler, dispatcher };
+  return { network, db, releaseLock, server, indexer, runPass, tokens, reconciler, dispatcher };
 });
 const defaultRuntime = runtimes[0]!;
+// Release the database locks however the process ends; a crash that skips
+// this leaves a stale lock, which the next taker detects by its dead PID.
+process.on("exit", () => {
+  for (const rt of runtimes) rt.releaseLock();
+});
 
 const keeper = config.KEEPER_ENABLED
   ? new Keeper(defaultRuntime.db, defaultRuntime.server, config)
@@ -245,7 +254,10 @@ async function shutdown(signal: string): Promise<void> {
   if (outcome === "timeout") logger.warn({ timeoutMs: config.SHUTDOWN_TIMEOUT_MS }, "passes still running; closing anyway");
   await stopTelemetry().catch(() => {});
   http.close(() => {
-    for (const rt of runtimes) rt.db.close();
+    for (const rt of runtimes) {
+      rt.db.close();
+      rt.releaseLock();
+    }
     process.exit(0);
   });
 }

@@ -276,6 +276,24 @@ matches the chain. A failed RPC read is logged and retried on the next pass;
 it never crashes the loop. Corrections are logged and reported on `/health`
 under `indexer.reconciliations` and `indexer.corrections`.
 
+### Rebuilding the projection from scratch
+
+When the database is corrupted, stop the server and run:
+
+```bash
+npm run reindex
+```
+
+For every configured network it moves the SQLite file (with its `-wal` and
+`-shm` files) aside to `<DATABASE_PATH>.bak-<UTC timestamp>`, creates a fresh
+database and catches up from `INDEXER_START_LEDGER`. The old file is never
+deleted; remove the backup yourself once the new projection checks out.
+
+The running server holds `<DATABASE_PATH>.lock` (its PID), and `reindex`
+refuses to run while that process is alive, so it cannot move a database out
+from under a live server. A lock left by a crashed process is detected by its
+dead PID and taken over.
+
 ### Rotating the keeper key without downtime
 
 `charge` is permissionless, so the keeper key is only a fee payer â€” but losing
