@@ -58,7 +58,8 @@ replays that range on restart. Every write is designed for that:
 ```bash
 npm install
 cp .env.example .env      # already points at the deployed testnet contracts
-npm test                  # 472 tests, no network needed
+npm test                  # 477 tests, no network needed
+npm run test:coverage     # the same tests, with a coverage report and a threshold
 npm run dev
 ```
 
