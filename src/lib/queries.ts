@@ -36,6 +36,7 @@ export interface ListCursorFilter {
 
 export interface ListPlansFilter extends ListCursorFilter {
   merchant?: string | undefined;
+  q?: string | undefined;
 }
 
 export interface ListMandatesFilter extends ListCursorFilter {
@@ -73,11 +74,29 @@ export function listPlans(
   db: DatabaseSync,
   filter: ListPlansFilter,
 ): { rows: PlanRow[]; nextCursorId: number | null } {
+  const conditions: string[] = [];
+  const args: unknown[] = [];
+
+  if (filter.merchant) {
+    conditions.push("merchant = ?");
+    args.push(filter.merchant);
+  }
+  if (filter.q) {
+    const escaped = filter.q
+      .replace(/\\/g, "\\\\")
+      .replace(/%/g, "\\%")
+      .replace(/_/g, "\\_");
+    conditions.push("LOWER(name) LIKE LOWER(?) ESCAPE '\\'");
+    args.push(`%${escaped}%`);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
   return cursorPage(
     db,
     "FROM plans",
-    filter.merchant ? "WHERE merchant = ?" : "",
-    filter.merchant ? [filter.merchant] : [],
+    where,
+    args,
     filter,
   );
 }
