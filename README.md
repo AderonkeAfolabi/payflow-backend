@@ -767,6 +767,7 @@ examined without API downtime.
 | `KEEPER_CHANNEL_SECRETS` | *(empty)* | Extra `S...` channel keys, comma-separated: each settles in parallel with its own sequence and fees; see [Settling in parallel with channel accounts](#settling-in-parallel-with-channel-accounts) |
 | `KEEPER_INTERVAL_MS` | `60000` | Settlement poll interval |
 | `KEEPER_ORDER` | `oldest` | Order for due mandates: `oldest` (due date ascending) or `largest` (amount descending) |
+| `KEEPER_MERCHANTS` | *(empty)* | Only settle mandates payable to these merchants, comma-separated `G...` addresses. Empty settles every merchant |
 | `KEEPER_FEE_PERCENTILE` | `90` | Soroban inclusion-fee percentile used for charge transactions (`50`, `60`, `70`, `80`, `90`, `95`, or `99`) |
 | `KEEPER_MAX_FEE` | `100000` | Maximum inclusion fee in stroops; congestion retries cannot exceed this cap |
 | `KEEPER_BATCH` | `true` | Use `charge_many` when supported, falling back to single charges when unavailable |
