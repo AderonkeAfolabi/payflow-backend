@@ -600,6 +600,18 @@ failed and stops receiving deliveries until re-registered. Undelivered
 deliveries are retried on a short cadence, so a silent indexer still makes
 delivery progress.
 
+`GET /api/webhooks?merchant=<G...>&timestamp=<unix s>&signature=<base64>`
+lists the merchant's webhooks, newest first, signed over
+`payflow-webhook-list:v1:<merchant>:<timestamp>`. Secrets are never returned
+again: each entry shows only `secretLast4`. `DELETE /api/webhooks/:id` removes
+one, with `{ merchant, timestamp, signature }` as a JSON body (or the same
+three query parameters) signed over
+`payflow-webhook-delete:v1:<merchant>:<id>:<timestamp>`; a deleted webhook gets
+no further deliveries and its scheduled retries are dropped. Each action has
+its own message prefix, so a signature for one cannot be replayed as another.
+A wrong, malformed or expired (older than ten minutes) signature is a `401
+unauthorized`.
+
 | `error.code` | HTTP | Where |
 |---|---|---|
 | `not_found` | 404 | An unknown path, or a method/path the API does not expose |
@@ -612,7 +624,7 @@ delivery progress.
 | `token_metadata_unavailable` | 502 | `GET /api/tokens/:id` while the token contract cannot be read |
 | `rate_limited` | 429 | API request exceeded the configured per-IP limit; includes `Retry-After` |
 | `stream_limit` | 503 | `GET /api/stream` when the concurrent stream cap is reached |
-| `unauthorized` | 401 | A `/admin/*` request without a valid bearer token |
+| `unauthorized` | 401 | A `/admin/*` request without a valid bearer token, or a webhook list/delete with a wrong or expired signature |
 | `reindex_unavailable` | 503 | `POST /admin/reindex` on a process without an indexer |
 | `indexer_unavailable` | 503 | `/admin/indexer/pause`/`resume` on a process without an indexer |
 | `keeper_unavailable` | 503 | A keeper endpoint while `KEEPER_ENABLED=false` |
